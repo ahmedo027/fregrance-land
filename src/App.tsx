@@ -1,7 +1,7 @@
 import { type CSSProperties, type FormEvent, useEffect, useState } from 'react'
 import ProductsAdminV2 from './ProductsAdmin'
 
-type View = 'shop' | 'cart' | 'orders' | 'products'
+type View = 'shop' | 'cart' | 'orders' | 'products' | 'admin'
 type OrderStatus = 'Pending' | 'Processing' | 'Shipped' | 'Completed' | 'Cancelled'
 
 export type Product = {
@@ -87,7 +87,7 @@ function icon(name: 'search' | 'bag' | 'arrow' | 'plus' | 'minus' | 'close' | 'e
 }
 
 function money(value: number) { return `$${value.toFixed(2)}` }
-function getView() { const path = window.location.pathname; return path.includes('cart') ? 'cart' : path.includes('orders') ? 'orders' : path.includes('products') ? 'products' : 'shop' as View }
+function getView() { const path = window.location.pathname; return path === '/admin' || path === '/admin/' ? 'admin' : path.includes('cart') ? 'cart' : path.includes('orders') ? 'orders' : path.includes('products') ? 'products' : 'shop' as View }
 async function apiJson<T>(url: string, options: RequestInit = {}) {
   const response = await fetch(url, { credentials: 'include', ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } })
   const payload = await response.json().catch(() => ({}))
@@ -135,7 +135,10 @@ export default function App() {
       if (!alive) return
       setAdminMode(true)
       const [allProducts, remoteOrders] = await Promise.all([apiJson<Product[]>('/api/products/all'), apiJson<Order[]>('/api/orders')])
-      if (alive) { setProducts(allProducts); setOrders(remoteOrders) }
+      if (alive) {
+        setProducts(allProducts); setOrders(remoteOrders)
+        if (getView() === 'admin') { window.history.replaceState({}, '', '/orders'); setView('orders') }
+      }
     }).catch(() => undefined)
     return () => { alive = false }
   }, [])
@@ -177,14 +180,13 @@ export default function App() {
     try {
       await apiJson('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })
       const [allProducts, remoteOrders] = await Promise.all([apiJson<Product[]>('/api/products/all'), apiJson<Order[]>('/api/orders')])
-      setProducts(allProducts); setOrders(remoteOrders); setAdminMode(true); setShowLogin(false); setAuthError('')
+      setProducts(allProducts); setOrders(remoteOrders); setAdminMode(true); setShowLogin(false); setAuthError(''); navigate('orders')
     } catch (error) { setAuthError(error instanceof Error ? error.message : 'Unable to sign in.') }
   }
 
-  async function toggleAdmin() {
-    if (!adminMode) { setAuthError(''); setShowLogin(true); return }
+  async function logoutAdmin() {
     await apiJson('/api/auth/logout', { method: 'POST' }).catch(() => undefined)
-    setAdminMode(false)
+    setAdminMode(false); navigate('shop')
   }
 
   async function saveProduct(product: Product) {
@@ -204,19 +206,20 @@ export default function App() {
   }
 
   return <div className="app-shell">
-    <Header view={view} cartCount={cartCount} adminMode={adminMode} onNavigate={navigate} onToggleAdmin={toggleAdmin} />
+    <Header view={view} cartCount={cartCount} adminMode={adminMode} onNavigate={navigate} onLogout={logoutAdmin} />
     {view === 'shop' && <Shop products={activeProducts} onProduct={openProduct} onNavigate={navigate} />}
     {view === 'cart' && <Cart products={products} cart={cart} total={cartTotal} onUpdate={updateLine} onNavigate={navigate} onSubmit={submitOrder} />}
     {view === 'orders' && adminMode && <Orders orders={orders} products={products} onStatus={updateOrderStatus} />}
     {view === 'products' && adminMode && <ProductsAdminV2 products={products} onSave={saveProduct} onDelete={deleteProduct} />}
-    {(view === 'orders' || view === 'products') && !adminMode && <AdminLocked onToggle={() => { setAuthError(''); setShowLogin(true) }} />}
-    {showLogin && <AdminLogin onClose={() => setShowLogin(false)} onLogin={loginAdmin} error={authError} />}
+    {view === 'admin' && !adminMode && <AdminLocked onSignIn={() => { setAuthError(''); setShowLogin(true) }} />}
+    {(view === 'orders' || view === 'products') && !adminMode && <AdminRouteGuard onNavigate={navigate} />}
+    {showLogin && view === 'admin' && <AdminLogin onClose={() => setShowLogin(false)} onLogin={loginAdmin} error={authError} />}
     {activeProduct && <ProductModal product={activeProduct} selectedSize={selectedSize} selectedQuantity={selectedQuantity} onSize={setSelectedSize} onQuantity={setSelectedQuantity} onClose={() => setActiveProduct(null)} onAdd={() => addToCart(activeProduct.id, selectedSize, selectedQuantity)} />}
     {notice && <div className="toast"><span className="toast-icon">{icon('check')}</span>{notice}</div>}
   </div>
 }
 
-function Header({ view, cartCount, adminMode, onNavigate, onToggleAdmin }: { view: View; cartCount: number; adminMode: boolean; onNavigate: (view: View) => void; onToggleAdmin: () => void }) {
+function Header({ view, cartCount, adminMode, onNavigate, onLogout }: { view: View; cartCount: number; adminMode: boolean; onNavigate: (view: View) => void; onLogout: () => void }) {
   const [mobileOpen, setMobileOpen] = useState(false)
   const nav = (next: View) => { onNavigate(next); setMobileOpen(false) }
   return <header className="site-header">
@@ -227,7 +230,7 @@ function Header({ view, cartCount, adminMode, onNavigate, onToggleAdmin }: { vie
         <button className={view === 'shop' ? 'nav-link active' : 'nav-link'} onClick={() => nav('shop')}>Shop perfumes</button>
         <button className={view === 'cart' ? 'nav-link cart-nav active' : 'nav-link cart-nav'} onClick={() => nav('cart')} aria-label={`Your cart ${cartCount}`}>{icon('bag')}<span className="cart-count">{cartCount}</span></button>
         {adminMode && <><span className="nav-divider" /><button className={view === 'orders' ? 'nav-link admin-link active' : 'nav-link admin-link'} onClick={() => nav('orders')}>Orders</button><button className={view === 'products' ? 'nav-link admin-link active' : 'nav-link admin-link'} onClick={() => nav('products')}>Products</button></>}
-        <button className="admin-toggle" onClick={onToggleAdmin}>{adminMode ? 'Exit admin' : 'Admin demo'}</button>
+        {adminMode && <button className="admin-toggle" onClick={onLogout}>Exit admin</button>}
       </nav>
     </div>
   </header>
@@ -263,7 +266,8 @@ function Orders({ orders, products, onStatus }: { orders: Order[]; products: Pro
 
 function ProductsAdmin({ products, onSave, onDelete }: { products: Product[]; onSave: (product: Product) => void; onDelete: (id: string) => void }) { const blank: Product = { id: '', name: '', subtitle: '', category: 'Woody', price: 120, stock: 10, notes: [''], description: '', images: [fallbackImage, fallbackImage], sizes: [50, 75, 100], active: true, accent: '#c8753c' }; const [draft, setDraft] = useState<Product>(blank); const [editing, setEditing] = useState(false); const [saved, setSaved] = useState(false); function save(event: FormEvent) { event.preventDefault(); const product = { ...draft, id: draft.id || `${draft.name.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`, notes: draft.notes.filter(Boolean) }; onSave(product); setDraft(blank); setEditing(false); setSaved(true); window.setTimeout(() => setSaved(false), 2200) } function edit(product: Product) { setDraft(product); setEditing(true); window.scrollTo({ top: 0, behavior: 'smooth' }) } return <main className="admin-page page-wrap"><div className="admin-intro"><div><p className="eyebrow">Admin / Catalog</p><h1>Make the shelf <em>yours.</em></h1></div><button className="button button-dark" onClick={() => { setDraft(blank); setEditing(false) }}>{icon('plus')} New product</button></div><div className="product-admin-layout"><form className="product-form" onSubmit={save}><div className="form-card-heading"><div><p className="eyebrow">{editing ? 'Edit product' : 'Add a new product'}</p><h2>{editing ? draft.name : 'New fragrance'}</h2></div>{editing && <button type="button" className="icon-button" onClick={() => { setDraft(blank); setEditing(false) }} aria-label="Cancel editing">{icon('close')}</button>}</div><label>Product name<input required value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} placeholder="e.g. Rose Atelier" /></label><label>Short description<input required value={draft.subtitle} onChange={event => setDraft({ ...draft, subtitle: event.target.value })} placeholder="A warm, polished signature" /></label><div className="form-row"><label>Category<select value={draft.category} onChange={event => setDraft({ ...draft, category: event.target.value })}>{['Woody', 'Floral', 'Fresh', 'Oriental'].map(category => <option key={category}>{category}</option>)}</select></label><label>Price<input required type="number" min="0" value={draft.price} onChange={event => setDraft({ ...draft, price: Number(event.target.value) })} /></label></div><div className="form-row"><label>Stock<input required type="number" min="0" value={draft.stock} onChange={event => setDraft({ ...draft, stock: Number(event.target.value) })} /></label><label>Accent color<input type="color" value={draft.accent} onChange={event => setDraft({ ...draft, accent: event.target.value })} /></label></div><label>Image URL<input value={draft.images[0]} onChange={event => setDraft({ ...draft, images: [event.target.value, draft.images[1] || event.target.value] })} placeholder="https://..." /></label><label>Fragrance notes<input value={draft.notes.join(', ')} onChange={event => setDraft({ ...draft, notes: event.target.value.split(',').map(note => note.trim()) })} placeholder="Sandalwood, Rose, Amber" /></label><label>Description<textarea required value={draft.description} onChange={event => setDraft({ ...draft, description: event.target.value })} placeholder="Tell customers how it feels..."></textarea></label><label className="checkbox-label"><input type="checkbox" checked={draft.active} onChange={event => setDraft({ ...draft, active: event.target.checked })} /> Visible in shop</label><button className="button button-dark full-button" type="submit">{editing ? 'Save changes' : 'Add to catalog'} {icon('arrow')}</button>{saved && <p className="saved-message">{icon('check')} Saved successfully.</p>}</form><div className="admin-product-list"><div className="list-heading"><h2>Catalog</h2><span>{products.length} products</span></div>{products.map(product => <div className="admin-product-row" key={product.id}><img src={product.images[0]} alt="" /><div><strong>{product.name}</strong><small>{product.category} · {product.stock} in stock</small></div><span className={product.active ? 'active-dot' : 'inactive-dot'}>{product.active ? 'Live' : 'Hidden'}</span><button className="icon-button" onClick={() => edit(product)} aria-label={`Edit ${product.name}`}>{icon('edit')}</button><button className="icon-button danger" onClick={() => onDelete(product.id)} aria-label={`Delete ${product.name}`}>{icon('trash')}</button></div>)}</div></div></main> }
 
-function AdminLocked({ onToggle }: { onToggle: () => void }) { return <main className="admin-locked page-wrap"><div className="locked-mark">{icon('sparkle')}</div><p className="eyebrow">Private studio</p><h1>Admin access <em>is off.</em></h1><p>Sign in to manage orders, inventory and product images.</p><button className="button button-dark" onClick={onToggle}>Sign in to admin {icon('arrow')}</button></main> }
+function AdminLocked({ onSignIn }: { onSignIn: () => void }) { return <main className="admin-locked page-wrap"><div className="locked-mark">{icon('sparkle')}</div><p className="eyebrow">Private studio / Admin</p><h1>Welcome <em>back.</em></h1><p>Sign in to manage orders, inventory and product images.</p><button className="button button-dark" onClick={onSignIn}>Sign in to admin {icon('arrow')}</button></main> }
+function AdminRouteGuard({ onNavigate }: { onNavigate: (view: View) => void }) { return <main className="admin-locked page-wrap"><div className="locked-mark">{icon('sparkle')}</div><p className="eyebrow">Private studio</p><h1>This area is <em>private.</em></h1><p>Admin sign in is available only from the private admin page.</p><button className="button button-dark" onClick={() => onNavigate('admin')}>Go to admin sign in {icon('arrow')}</button></main> }
 function AdminLogin({ onClose, onLogin, error }: { onClose: () => void; onLogin: (email: string, password: string) => Promise<void>; error: string }) { const [email, setEmail] = useState('admin@fragranceland.local'); const [password, setPassword] = useState('admin123'); const [busy, setBusy] = useState(false); async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setBusy(true); await onLogin(email, password); setBusy(false) } return <div className="modal-backdrop" role="presentation" onMouseDown={event => event.target === event.currentTarget && onClose()}><div className="login-card" role="dialog" aria-modal="true" aria-label="Admin sign in"><button className="modal-close" onClick={onClose} aria-label="Close admin sign in">{icon('close')}</button><p className="eyebrow">Fragrance Land / Private studio</p><h2>Welcome back.</h2><p className="login-copy">Sign in to manage your catalog and incoming orders.</p><form onSubmit={submit}><label>Email address<input required type="email" value={email} onChange={event => setEmail(event.target.value)} /></label><label>Password<input required type="password" value={password} onChange={event => setPassword(event.target.value)} /></label>{error && <p className="field-error">{error}</p>}<button className="button button-dark full-button" disabled={busy} type="submit">{busy ? 'Signing in…' : 'Sign in'} {icon('arrow')}</button><p className="login-hint">Local default: admin@fragranceland.local / admin123</p></form></div></div> }
 function Footer() { return <footer className="site-footer section-wrap"><img src={logo} alt="Fragrance Land" /><p>© 2026 Fragrance Land. Made for beautiful rituals.</p><span>Dubai · UAE</span></footer> }
 
