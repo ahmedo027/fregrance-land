@@ -3,6 +3,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import Stripe from 'stripe'
 
 const root = path.dirname(fileURLToPath(import.meta.url))
 const publicDir = path.join(root, 'public')
@@ -14,6 +15,9 @@ const port = Number(process.env.PORT || 3012)
 const adminEmail = process.env.ADMIN_EMAIL || 'admin@fragranceland.local'
 const adminPassword = process.env.ADMIN_PASSWORD || 'admin123'
 const sessionSecret = process.env.SESSION_SECRET || 'fragrance-land-local-secret-change-me'
+const stripeSecretKey = process.env.STRIPE_SECRET_KEY || ''
+const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET || ''
+const stripe = stripeSecretKey ? new Stripe(stripeSecretKey) : null
 
 fs.mkdirSync(dataDir, { recursive: true })
 fs.mkdirSync(uploadDir, { recursive: true })
@@ -31,6 +35,7 @@ function initialStore() {
   return {
     products: seedProducts.map(([id, name, subtitle, category, price, stock, notes, description, image, accent, sizes]) => ({ id, name, subtitle, category, price, stock, notes, description, images: [image, image], sizes, active: true, accent })),
     orders: [],
+    pendingCheckouts: [],
   }
 }
 
@@ -40,7 +45,11 @@ function readStore() {
     fs.writeFileSync(storePath, JSON.stringify(fresh, null, 2))
     return fresh
   }
-  try { return JSON.parse(fs.readFileSync(storePath, 'utf8')) } catch { return initialStore() }
+  try {
+    const store = JSON.parse(fs.readFileSync(storePath, 'utf8'))
+    store.pendingCheckouts = Array.isArray(store.pendingCheckouts) ? store.pendingCheckouts : []
+    return store
+  } catch { return initialStore() }
 }
 
 function writeStore(store) { fs.writeFileSync(storePath, JSON.stringify(store, null, 2)) }
@@ -69,6 +78,15 @@ function body(req) {
     req.on('error', reject)
   })
 }
+function rawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let size = 0
+    req.on('data', chunk => { size += chunk.length; if (size > 12_000_000) req.destroy(new Error('Request too large.')); else chunks.push(chunk) })
+    req.on('end', () => resolve(Buffer.concat(chunks)))
+    req.on('error', reject)
+  })
+}
 function safeImage(dataUrl) {
   if (!dataUrl?.startsWith('data:image/')) return dataUrl
   const match = dataUrl.match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/)
@@ -89,6 +107,19 @@ function normalizeProduct(input, existing = {}) {
     sizes: Array.isArray(input.sizes) && input.sizes.length ? input.sizes.map(Number) : [50, 75, 100], images: [image, image], active: input.active !== false,
   }
 }
+function checkoutOrigin(req) {
+  const protocol = req.headers['x-forwarded-proto'] || 'http'
+  const host = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${port}`
+  return `${protocol}://${host}`
+}
+function createPaidOrder(store, draft, sessionId) {
+  if (store.orders.some(order => order.paymentSessionId === sessionId)) return null
+  const order = { id: `FL-${Date.now().toString().slice(-8)}`, date: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }), customer: draft.customer, lines: draft.lines, total: draft.total, status: 'Pending', paymentStatus: 'Paid', paymentSessionId: sessionId }
+  store.orders.unshift(order)
+  store.pendingCheckouts = store.pendingCheckouts.filter(item => item.id !== draft.id)
+  writeStore(store)
+  return order
+}
 function serveFile(req, res, filePath) {
   if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) { res.writeHead(404); res.end('Not found'); return }
   const ext = path.extname(filePath).toLowerCase()
@@ -108,6 +139,19 @@ const server = http.createServer(async (req, res) => {
     }
     if (route === '/api/auth/logout' && req.method === 'POST') { res.writeHead(200, { 'Content-Type': 'application/json', 'Set-Cookie': 'fl_session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0' }); return res.end(JSON.stringify({ ok: true })) }
     if (route === '/api/auth/me' && req.method === 'GET') { const admin = currentAdmin(req); return admin ? json(res, 200, { email: admin.email }) : json(res, 401, { error: 'Not signed in.' }) }
+    if (route === '/api/stripe/webhook' && req.method === 'POST') {
+      if (!stripe || !stripeWebhookSecret) return json(res, 503, { error: 'Stripe webhook is not configured.' })
+      const raw = await rawBody(req)
+      let event
+      try { event = stripe.webhooks.constructEvent(raw, req.headers['stripe-signature'], stripeWebhookSecret) } catch (error) { res.writeHead(400); return res.end(`Webhook Error: ${error.message}`) }
+      if (event.type === 'checkout.session.completed' || event.type === 'checkout.session.async_payment_succeeded') {
+        const session = event.data.object
+        const store = readStore()
+        const draft = store.pendingCheckouts.find(item => item.id === session.metadata?.draftId)
+        if (draft) createPaidOrder(store, draft, session.id)
+      }
+      return json(res, 200, { received: true })
+    }
     const store = readStore()
     if (route === '/api/products' && req.method === 'GET') return json(res, 200, store.products.filter(product => product.active))
     if (route === '/api/products/all' && req.method === 'GET') { if (!requireAdmin(req, res)) return; return json(res, 200, store.products) }
@@ -115,6 +159,35 @@ const server = http.createServer(async (req, res) => {
     const productMatch = route.match(/^\/api\/products\/([^/]+)$/)
     if (productMatch && req.method === 'PUT') { if (!requireAdmin(req, res)) return; const index = store.products.findIndex(product => product.id === productMatch[1]); if (index < 0) return json(res, 404, { error: 'Product not found.' }); const product = normalizeProduct(await body(req), store.products[index]); store.products[index] = product; writeStore(store); return json(res, 200, product) }
     if (productMatch && req.method === 'DELETE') { if (!requireAdmin(req, res)) return; store.products = store.products.filter(product => product.id !== productMatch[1]); writeStore(store); return noContent(res) }
+    if (route === '/api/checkout/session' && req.method === 'POST') {
+      if (!stripe) return json(res, 503, { error: 'Stripe payments are not configured yet.' })
+      const input = await body(req)
+      if (!input.customer?.name || !input.customer?.email || !input.customer?.phone || !input.customer?.address || !Array.isArray(input.lines) || !input.lines.length) return json(res, 400, { error: 'Complete customer details and add at least one product.' })
+      const lines = input.lines.map(line => { const product = store.products.find(item => item.id === line.productId && item.active); if (!product) throw new Error('One of the selected products is unavailable.'); const quantity = Math.max(1, Number(line.quantity || 1)); return { productId: product.id, size: Number(line.size || product.sizes[0]), quantity, price: product.price } })
+      const total = lines.reduce((sum, line) => sum + line.price * line.quantity, 0)
+      const draft = { id: crypto.randomUUID(), customer: input.customer, lines, total, createdAt: new Date().toISOString() }
+      store.pendingCheckouts.unshift(draft)
+      writeStore(store)
+      try {
+        const session = await stripe.checkout.sessions.create({
+          mode: 'payment',
+          line_items: lines.map(line => { const product = store.products.find(item => item.id === line.productId); return { price_data: { currency: 'usd', product_data: { name: `${product.name} · ${line.size} ml`, description: product.subtitle }, unit_amount: Math.round(line.price * 100) }, quantity: line.quantity } }),
+          customer_email: input.customer.email,
+          phone_number_collection: { enabled: true },
+          billing_address_collection: 'required',
+          metadata: { draftId: draft.id },
+          success_url: `${checkoutOrigin(req)}/?payment=success&session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${checkoutOrigin(req)}/cart?payment=cancelled`,
+        })
+        draft.sessionId = session.id
+        writeStore(store)
+        return json(res, 200, { url: session.url })
+      } catch (error) {
+        store.pendingCheckouts = store.pendingCheckouts.filter(item => item.id !== draft.id)
+        writeStore(store)
+        throw error
+      }
+    }
     if (route === '/api/orders' && req.method === 'POST') {
       const input = await body(req)
       if (!input.customer?.name || !input.customer?.email || !input.customer?.phone || !input.customer?.address || !Array.isArray(input.lines) || !input.lines.length) return json(res, 400, { error: 'Complete customer details and add at least one product.' })
