@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+data/store.json
+public/uploads/*
+!public/uploads/.gitkeep
+outputs/
+work/
+
