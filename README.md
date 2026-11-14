@@ -22,6 +22,10 @@ Default local credentials:
 
 Set `ADMIN_EMAIL`, `ADMIN_PASSWORD`, and `SESSION_SECRET` in `.env` before using the app beyond local testing.
 
+## Stripe payments
+
+The checkout uses Stripe Checkout. Set `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` in the environment. In Stripe Dashboard, create a webhook endpoint at `/api/stripe/webhook` and listen for `checkout.session.completed` and `checkout.session.async_payment_succeeded`. Orders are created in the admin area only after Stripe confirms payment.
+
 ## Production direction
 
 The app is structured as a single Node service so it can be pushed to GitHub and deployed to Render. Before going live, configure environment secrets, attach persistent storage or move the store to managed Postgres/object storage, add a real payment provider, and use HTTPS.
