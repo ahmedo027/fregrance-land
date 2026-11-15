@@ -26,13 +26,15 @@ export type Product = {
 }
 
 type CartLine = { productId: string; size: number; quantity: number }
+type OrderLine = CartLine & { price?: number }
 type Order = {
   id: string
   date: string
   customer: { name: string; email: string; phone: string; address: string; notes: string }
-  lines: CartLine[]
+  lines: OrderLine[]
   total: number
   status: OrderStatus
+  paymentStatus?: string
 }
 
 const logo = '/assets/fragrance-land-logo.png'
@@ -156,6 +158,15 @@ export default function App() {
     }).catch(() => undefined)
     return () => { alive = false }
   }, [])
+
+  useEffect(() => {
+    if (!adminMode || view !== 'orders') return
+    let alive = true
+    const refreshOrders = () => apiJson<Order[]>('/api/orders').then(remoteOrders => { if (alive) setOrders(remoteOrders) }).catch(() => undefined)
+    refreshOrders()
+    const interval = window.setInterval(refreshOrders, 10000)
+    return () => { alive = false; window.clearInterval(interval) }
+  }, [adminMode, view])
 
   useEffect(() => {
     const payment = new URLSearchParams(window.location.search).get('payment')
@@ -301,7 +312,40 @@ function ProductModal({ product, categories, selectedSize, selectedQuantity, onS
 
 function Cart({ products, categories, cart, total, onUpdate, onNavigate, onSubmit }: { products: Product[]; categories: Category[]; cart: CartLine[]; total: number; onUpdate: (line: CartLine, quantity: number) => void; onNavigate: (view: View) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) { return <main className="page-wrap"><div className="page-intro"><p className="eyebrow">Your collection</p><h1>Take your favorites<br /><em>home with you.</em></h1></div>{cart.length === 0 ? <div className="empty-cart"><div className="empty-cart-mark">{icon('bag')}</div><h2>Your cart is waiting.</h2><p>Start with one scent and see where it takes you.</p><button className="button button-dark" onClick={() => onNavigate('shop')}>Explore perfumes {icon('arrow')}</button></div> : <div className="cart-layout"><section className="cart-lines"><div className="cart-section-title"><h2>Selected scents</h2><span>{cart.length} {cart.length === 1 ? 'item' : 'items'}</span></div>{cart.map(line => { const product = products.find(item => item.id === line.productId); if (!product) return null; return <div className="cart-line" key={`${line.productId}-${line.size}`}><img src={product.images[0]} alt={product.name} /><div className="cart-line-info"><p className="eyebrow">{categoryLabel(product.category, categories)}</p><h3>{product.name}</h3><p>{line.size} ml · {money(product.price)}</p></div><div className="quantity-control"><button onClick={() => onUpdate(line, line.quantity - 1)} aria-label="Decrease quantity">{icon('minus')}</button><span>{line.quantity}</span><button onClick={() => onUpdate(line, line.quantity + 1)} aria-label="Increase quantity">{icon('plus')}</button></div><strong>{money(product.price * line.quantity)}</strong><button className="remove-button" onClick={() => onUpdate(line, 0)}>Remove</button></div>})}<button className="text-button back-button" onClick={() => onNavigate('shop')}>← Continue shopping</button></section><section className="checkout-card"><div className="checkout-summary"><div><span>Subtotal</span><strong>{money(total)}</strong></div><div><span>Delivery</span><strong className="free">Complimentary</strong></div><div className="total-row"><span>Total</span><strong>{money(total)}</strong></div></div><div className="checkout-divider" /><form onSubmit={onSubmit}><div className="checkout-title"><p className="eyebrow">Almost yours</p><h2>Delivery details</h2></div><label>Full name<input required name="name" placeholder="Your name" /></label><label>Email address<input required type="email" name="email" placeholder="you@example.com" /></label><div className="form-row"><label>Phone<input required name="phone" placeholder="+971" /></label><label>Address<input required name="address" placeholder="City, area" /></label></div><label>Notes <span className="optional">optional</span><textarea name="notes" placeholder="Anything we should know?"></textarea></label><button className="button button-dark full-button" type="submit">Continue to secure payment {icon('arrow')}</button><p className="secure-note">Secure payment powered by Stripe.</p></form></section></div>}</main> }
 
-function Orders({ orders, products, onStatus }: { orders: Order[]; products: Product[]; onStatus: (id: string, status: OrderStatus) => void }) { return <main className="admin-page page-wrap"><div className="admin-intro"><div><p className="eyebrow">Admin / Operations</p><h1>Orders <em>coming in.</em></h1></div><div className="admin-stat"><span>{orders.filter(order => order.status === 'Pending').length}</span><small>awaiting attention</small></div></div><div className="admin-table"><div className="table-head"><span>Order</span><span>Customer</span><span>Items</span><span>Total</span><span>Status</span></div>{orders.map(order => <div className="table-row" key={order.id}><div><strong>{order.id}</strong><small>{order.date}</small></div><div><strong>{order.customer.name}</strong><small>{order.customer.email}</small></div><div><strong>{order.lines.reduce((sum, line) => sum + line.quantity, 0)} items</strong><small>{order.lines.map(line => products.find(product => product.id === line.productId)?.name).join(', ')}</small></div><strong>{money(order.total)}</strong><select className={`status-select ${order.status.toLowerCase()}`} value={order.status} onChange={event => onStatus(order.id, event.target.value as OrderStatus)}>{(['Pending', 'Processing', 'Shipped', 'Completed', 'Cancelled'] as OrderStatus[]).map(status => <option key={status}>{status}</option>)}</select></div>)}</div></main> }
+function Orders({ orders, products, onStatus }: { orders: Order[]; products: Product[]; onStatus: (id: string, status: OrderStatus) => void }) {
+  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null)
+  const selectedOrder = orders.find(order => order.id === selectedOrderId)
+
+  useEffect(() => {
+    if (selectedOrderId && !selectedOrder) setSelectedOrderId(null)
+  }, [selectedOrderId, selectedOrder])
+
+  return <main className="admin-page page-wrap">
+    <div className="admin-intro"><div><p className="eyebrow">Admin / Operations</p><h1>Orders <em>coming in.</em></h1><p className="admin-refresh-note">Paid website orders · updates automatically</p></div><div className="admin-stat"><span>{orders.filter(order => order.status === 'Pending').length}</span><small>awaiting attention</small></div></div>
+    <div className="admin-table">
+      <div className="table-head"><span>Order</span><span>Customer</span><span>Items</span><span>Total</span><span>Status</span></div>
+      {orders.map(order => <div className={selectedOrderId === order.id ? 'table-row order-row selected' : 'table-row order-row'} key={order.id} role="button" tabIndex={0} onClick={() => setSelectedOrderId(order.id)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') setSelectedOrderId(order.id) }}>
+        <div><strong>{order.id}</strong><small>{order.date}</small><small className="row-detail-hint">View details</small></div>
+        <div><strong>{order.customer.name}</strong><small>{order.customer.email}</small></div>
+        <div><strong>{order.lines.reduce((sum, line) => sum + line.quantity, 0)} items</strong><small>{order.lines.map(line => products.find(product => product.id === line.productId)?.name || 'Product').join(', ')}</small></div>
+        <strong>{money(order.total)}</strong>
+        <select className={`status-select ${order.status.toLowerCase()}`} value={order.status} onClick={event => event.stopPropagation()} onChange={event => onStatus(order.id, event.target.value as OrderStatus)}>{(['Pending', 'Processing', 'Shipped', 'Completed', 'Cancelled'] as OrderStatus[]).map(status => <option key={status}>{status}</option>)}</select>
+      </div>)}
+      {!orders.length && <div className="orders-empty"><h2>No paid orders yet.</h2><p>Completed Stripe payments will appear here automatically.</p></div>}
+    </div>
+    {selectedOrder && <OrderDetails order={selectedOrder} products={products} onClose={() => setSelectedOrderId(null)} />}
+  </main>
+}
+
+function OrderDetails({ order, products, onClose }: { order: Order; products: Product[]; onClose: () => void }) {
+  return <section className="order-details" aria-label={`Details for ${order.id}`}>
+    <div className="order-details-heading"><div><p className="eyebrow">Order details</p><h2>{order.id}</h2><p>{order.date}</p></div><div className="order-details-actions"><span className="payment-badge">{order.paymentStatus || 'Paid via Stripe'}</span><button className="icon-button" onClick={onClose} aria-label="Close order details">{icon('close')}</button></div></div>
+    <div className="order-details-grid">
+      <div className="order-customer-card"><p className="label">Customer</p><h3>{order.customer.name}</h3><dl><div><dt>Email</dt><dd>{order.customer.email}</dd></div><div><dt>Phone</dt><dd>{order.customer.phone}</dd></div><div><dt>Address</dt><dd>{order.customer.address}</dd></div>{order.customer.notes && <div><dt>Notes</dt><dd>{order.customer.notes}</dd></div>}</dl></div>
+      <div className="order-items-card"><div className="order-items-heading"><p className="label">Items</p><span>{order.lines.reduce((sum, line) => sum + line.quantity, 0)} items</span></div>{order.lines.map((line, index) => { const product = products.find(item => item.id === line.productId); const unitPrice = line.price ?? product?.price ?? 0; return <div className="order-item" key={`${line.productId}-${line.size}-${index}`}><img src={product?.images[0]} alt={product?.name || 'Product'} /><div><strong>{product?.name || 'Product unavailable'}</strong><p>{line.size} ml · Qty {line.quantity}</p></div><span>{money(unitPrice * line.quantity)}</span></div> })}<div className="order-total"><span>Total paid</span><strong>{money(order.total)}</strong></div></div>
+    </div>
+  </section>
+}
 
 function ProductsAdmin({ products, onSave, onDelete }: { products: Product[]; onSave: (product: Product) => void; onDelete: (id: string) => void }) { const blank: Product = { id: '', name: '', subtitle: '', category: 'Woody', price: 120, stock: 10, notes: [''], description: '', images: [fallbackImage, fallbackImage], sizes: [50, 75, 100], active: true, accent: '#c8753c' }; const [draft, setDraft] = useState<Product>(blank); const [editing, setEditing] = useState(false); const [saved, setSaved] = useState(false); function save(event: FormEvent) { event.preventDefault(); const product = { ...draft, id: draft.id || `${draft.name.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`, notes: draft.notes.filter(Boolean) }; onSave(product); setDraft(blank); setEditing(false); setSaved(true); window.setTimeout(() => setSaved(false), 2200) } function edit(product: Product) { setDraft(product); setEditing(true); window.scrollTo({ top: 0, behavior: 'smooth' }) } return <main className="admin-page page-wrap"><div className="admin-intro"><div><p className="eyebrow">Admin / Catalog</p><h1>Make the shelf <em>yours.</em></h1></div><button className="button button-dark" onClick={() => { setDraft(blank); setEditing(false) }}>{icon('plus')} New product</button></div><div className="product-admin-layout"><form className="product-form" onSubmit={save}><div className="form-card-heading"><div><p className="eyebrow">{editing ? 'Edit product' : 'Add a new product'}</p><h2>{editing ? draft.name : 'New fragrance'}</h2></div>{editing && <button type="button" className="icon-button" onClick={() => { setDraft(blank); setEditing(false) }} aria-label="Cancel editing">{icon('close')}</button>}</div><label>Product name<input required value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} placeholder="e.g. Rose Atelier" /></label><label>Short description<input required value={draft.subtitle} onChange={event => setDraft({ ...draft, subtitle: event.target.value })} placeholder="A warm, polished signature" /></label><div className="form-row"><label>Category<select value={draft.category} onChange={event => setDraft({ ...draft, category: event.target.value })}>{['Woody', 'Floral', 'Fresh', 'Oriental'].map(category => <option key={category}>{category}</option>)}</select></label><label>Price<input required type="number" min="0" value={draft.price} onChange={event => setDraft({ ...draft, price: Number(event.target.value) })} /></label></div><div className="form-row"><label>Stock<input required type="number" min="0" value={draft.stock} onChange={event => setDraft({ ...draft, stock: Number(event.target.value) })} /></label><label>Accent color<input type="color" value={draft.accent} onChange={event => setDraft({ ...draft, accent: event.target.value })} /></label></div><label>Image URL<input value={draft.images[0]} onChange={event => setDraft({ ...draft, images: [event.target.value, draft.images[1] || event.target.value] })} placeholder="https://..." /></label><label>Fragrance notes<input value={draft.notes.join(', ')} onChange={event => setDraft({ ...draft, notes: event.target.value.split(',').map(note => note.trim()) })} placeholder="Sandalwood, Rose, Amber" /></label><label>Description<textarea required value={draft.description} onChange={event => setDraft({ ...draft, description: event.target.value })} placeholder="Tell customers how it feels..."></textarea></label><label className="checkbox-label"><input type="checkbox" checked={draft.active} onChange={event => setDraft({ ...draft, active: event.target.checked })} /> Visible in shop</label><button className="button button-dark full-button" type="submit">{editing ? 'Save changes' : 'Add to catalog'} {icon('arrow')}</button>{saved && <p className="saved-message">{icon('check')} Saved successfully.</p>}</form><div className="admin-product-list"><div className="list-heading"><h2>Catalog</h2><span>{products.length} products</span></div>{products.map(product => <div className="admin-product-row" key={product.id}><img src={product.images[0]} alt="" /><div><strong>{product.name}</strong><small>{product.category} · {product.stock} in stock</small></div><span className={product.active ? 'active-dot' : 'inactive-dot'}>{product.active ? 'Live' : 'Hidden'}</span><button className="icon-button" onClick={() => edit(product)} aria-label={`Edit ${product.name}`}>{icon('edit')}</button><button className="icon-button danger" onClick={() => onDelete(product.id)} aria-label={`Delete ${product.name}`}>{icon('trash')}</button></div>)}</div></div></main> }
 
