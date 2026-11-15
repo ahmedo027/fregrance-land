@@ -22,6 +22,13 @@ const stripe = stripeSecretKey ? new Stripe(stripeSecretKey) : null
 fs.mkdirSync(dataDir, { recursive: true })
 fs.mkdirSync(uploadDir, { recursive: true })
 
+const seedCategories = [
+  { id: 'woody', nameEn: 'Woody', nameAr: 'خشبي' },
+  { id: 'floral', nameEn: 'Floral', nameAr: 'زهري' },
+  { id: 'fresh', nameEn: 'Fresh', nameAr: 'منعش' },
+  { id: 'oriental', nameEn: 'Oriental', nameAr: 'شرقي' },
+]
+
 const seedProducts = [
   ['santal-21', 'Santal 21', 'A warm, polished signature', 'Woody', 148, 18, ['Sandalwood', 'Cardamom', 'Amber'], 'A quiet statement of warm sandalwood, bright cardamom and a skin-like amber dry down. Designed to linger close and leave a memorable trail.', 'https://images.unsplash.com/photo-1547887538-e3a2f32cb1cc?auto=format&fit=crop&w=1200&q=85', '#c8753c', [50, 75, 100]],
   ['orange-blossom', 'Orange Blossom', 'Sunlit citrus, soft petals', 'Floral', 122, 24, ['Neroli', 'Orange blossom', 'Musk'], 'A luminous floral built around fresh neroli and orange blossom, softened with clean musk and a hint of green leaves.', 'https://images.unsplash.com/photo-1594035910387-fea47794261f?auto=format&fit=crop&w=1200&q=85', '#efaa62', [50, 75, 100]],
@@ -33,10 +40,40 @@ const seedProducts = [
 
 function initialStore() {
   return {
-    products: seedProducts.map(([id, name, subtitle, category, price, stock, notes, description, image, accent, sizes]) => ({ id, name, subtitle, category, price, stock, notes, description, images: [image, image], sizes, active: true, accent })),
+    categories: seedCategories,
+    products: seedProducts.map(([id, name, subtitle, category, price, stock, notes, description, image, accent, sizes]) => ({ id, name, subtitle, category: String(category).toLowerCase(), price, stock, notes, description, images: [image, image], sizes, active: true, accent })),
     orders: [],
     pendingCheckouts: [],
   }
+}
+
+function slugify(value) {
+  return String(value || 'category').trim().toLowerCase().normalize('NFKD').replace(/[^\p{L}\p{N}\s-]/gu, '').replace(/[\s_-]+/g, '-').replace(/^-+|-+$/g, '') || `category-${Date.now()}`
+}
+
+function normalizeCategory(input, existing = {}) {
+  const nameEn = String(input.nameEn ?? existing.nameEn ?? '').trim()
+  const nameAr = String(input.nameAr ?? existing.nameAr ?? '').trim()
+  if (!nameEn || !nameAr) throw new Error('Category needs both an English name and an Arabic name.')
+  return { ...existing, ...input, id: existing.id || input.id || slugify(nameEn), nameEn, nameAr }
+}
+
+function migrateStore(store) {
+  const categories = Array.isArray(store.categories) && store.categories.length ? store.categories : seedCategories.map(category => ({ ...category }))
+  const byId = new Map(categories.map(category => [String(category.id), category]))
+  const byName = new Map(categories.flatMap(category => [[String(category.nameEn).toLowerCase(), category.id], [String(category.nameAr), category.id]]))
+  for (const product of store.products || []) {
+    const current = String(product.category || '')
+    if (byId.has(current)) continue
+    const matchedId = byName.get(current.toLowerCase()) || byName.get(current)
+    if (matchedId) { product.category = matchedId; continue }
+    const custom = normalizeCategory({ nameEn: current || 'Uncategorized', nameAr: current || 'غير مصنف' })
+    if (!byId.has(custom.id)) { categories.push(custom); byId.set(custom.id, custom); byName.set(custom.nameEn.toLowerCase(), custom.id); byName.set(custom.nameAr, custom.id) }
+    product.category = custom.id
+  }
+  store.categories = categories.map(category => normalizeCategory(category))
+  store.products = Array.isArray(store.products) ? store.products : []
+  return store
 }
 
 function readStore() {
@@ -48,7 +85,7 @@ function readStore() {
   try {
     const store = JSON.parse(fs.readFileSync(storePath, 'utf8'))
     store.pendingCheckouts = Array.isArray(store.pendingCheckouts) ? store.pendingCheckouts : []
-    return store
+    return migrateStore(store)
   } catch { return initialStore() }
 }
 
@@ -104,6 +141,7 @@ function normalizeProduct(input, existing = {}) {
     ...input,
     id: existing.id || input.id || `${String(input.name || 'product').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}-${Date.now()}`,
     price: Number(input.price || 0), stock: Number(input.stock || 0), notes: Array.isArray(input.notes) ? input.notes.filter(Boolean) : [],
+    category: String(input.category || existing.category || 'woody'),
     sizes: Array.isArray(input.sizes) && input.sizes.length ? input.sizes.map(Number) : [50, 75, 100], images: [image, image], active: input.active !== false,
   }
 }
@@ -153,11 +191,32 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { received: true })
     }
     const store = readStore()
+    if (route === '/api/categories' && req.method === 'GET') return json(res, 200, store.categories)
+    if (route === '/api/categories/all' && req.method === 'GET') { if (!requireAdmin(req, res)) return; return json(res, 200, store.categories) }
+    if (route === '/api/categories' && req.method === 'POST') {
+      if (!requireAdmin(req, res)) return
+      const category = normalizeCategory(await body(req))
+      if (store.categories.some(item => item.id === category.id)) return json(res, 409, { error: 'A category with this name already exists.' })
+      store.categories.push(category); writeStore(store); return json(res, 201, category)
+    }
+    const categoryMatch = route.match(/^\/api\/categories\/([^/]+)$/)
+    if (categoryMatch && req.method === 'PUT') {
+      if (!requireAdmin(req, res)) return
+      const index = store.categories.findIndex(category => category.id === categoryMatch[1])
+      if (index < 0) return json(res, 404, { error: 'Category not found.' })
+      const category = normalizeCategory(await body(req), store.categories[index])
+      store.categories[index] = category; writeStore(store); return json(res, 200, category)
+    }
+    if (categoryMatch && req.method === 'DELETE') {
+      if (!requireAdmin(req, res)) return
+      if (store.products.some(product => product.category === categoryMatch[1])) return json(res, 409, { error: 'This category is used by a product. Reassign those products before deleting it.' })
+      store.categories = store.categories.filter(category => category.id !== categoryMatch[1]); writeStore(store); return noContent(res)
+    }
     if (route === '/api/products' && req.method === 'GET') return json(res, 200, store.products.filter(product => product.active))
     if (route === '/api/products/all' && req.method === 'GET') { if (!requireAdmin(req, res)) return; return json(res, 200, store.products) }
-    if (route === '/api/products' && req.method === 'POST') { if (!requireAdmin(req, res)) return; const product = normalizeProduct(await body(req)); store.products.push(product); writeStore(store); return json(res, 201, product) }
+    if (route === '/api/products' && req.method === 'POST') { if (!requireAdmin(req, res)) return; const input = await body(req); if (!store.categories.some(category => category.id === input.category)) return json(res, 400, { error: 'Choose a valid category.' }); const product = normalizeProduct(input); store.products.push(product); writeStore(store); return json(res, 201, product) }
     const productMatch = route.match(/^\/api\/products\/([^/]+)$/)
-    if (productMatch && req.method === 'PUT') { if (!requireAdmin(req, res)) return; const index = store.products.findIndex(product => product.id === productMatch[1]); if (index < 0) return json(res, 404, { error: 'Product not found.' }); const product = normalizeProduct(await body(req), store.products[index]); store.products[index] = product; writeStore(store); return json(res, 200, product) }
+    if (productMatch && req.method === 'PUT') { if (!requireAdmin(req, res)) return; const index = store.products.findIndex(product => product.id === productMatch[1]); if (index < 0) return json(res, 404, { error: 'Product not found.' }); const input = await body(req); if (!store.categories.some(category => category.id === input.category)) return json(res, 400, { error: 'Choose a valid category.' }); const product = normalizeProduct(input, store.products[index]); store.products[index] = product; writeStore(store); return json(res, 200, product) }
     if (productMatch && req.method === 'DELETE') { if (!requireAdmin(req, res)) return; store.products = store.products.filter(product => product.id !== productMatch[1]); writeStore(store); return noContent(res) }
     if (route === '/api/checkout/session' && req.method === 'POST') {
       if (!stripe) return json(res, 503, { error: 'Stripe payments are not configured yet.' })
