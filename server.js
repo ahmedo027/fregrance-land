@@ -171,7 +171,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const session = await stripe.checkout.sessions.create({
           mode: 'payment',
-          line_items: lines.map(line => { const product = store.products.find(item => item.id === line.productId); return { price_data: { currency: 'usd', product_data: { name: `${product.name} · ${line.size} ml`, description: product.subtitle }, unit_amount: Math.round(line.price * 100) }, quantity: line.quantity } }),
+          line_items: lines.map(line => { const product = store.products.find(item => item.id === line.productId); return { price_data: { currency: 'aed', product_data: { name: `${product.name} · ${line.size} ml`, description: product.subtitle }, unit_amount: Math.round(line.price * 100) }, quantity: line.quantity } }),
           customer_email: input.customer.email,
           phone_number_collection: { enabled: true },
           billing_address_collection: 'required',
