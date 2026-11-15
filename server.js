@@ -8,8 +8,9 @@ import Stripe from 'stripe'
 const root = path.dirname(fileURLToPath(import.meta.url))
 const publicDir = path.join(root, 'public')
 const distDir = path.join(root, 'dist')
-const dataDir = path.join(root, 'data')
-const uploadDir = path.join(publicDir, 'uploads')
+const dataDir = path.resolve(process.env.DATA_DIR || path.join(root, 'data'))
+const uploadDir = path.join(dataDir, 'uploads')
+const legacyUploadDir = path.join(publicDir, 'uploads')
 const storePath = path.join(dataDir, 'store.json')
 const port = Number(process.env.PORT || 3012)
 const adminEmail = process.env.ADMIN_EMAIL || 'admin@fragranceland.local'
@@ -17,10 +18,19 @@ const adminPassword = process.env.ADMIN_PASSWORD || 'admin123'
 const sessionSecret = process.env.SESSION_SECRET || 'fragrance-land-local-secret-change-me'
 const stripeSecretKey = process.env.STRIPE_SECRET_KEY || ''
 const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET || ''
+const isProduction = process.env.NODE_ENV === 'production'
 const stripe = stripeSecretKey ? new Stripe(stripeSecretKey) : null
 
 fs.mkdirSync(dataDir, { recursive: true })
 fs.mkdirSync(uploadDir, { recursive: true })
+
+if (isProduction) {
+  const missing = ['DATA_DIR', 'ADMIN_EMAIL', 'ADMIN_PASSWORD', 'SESSION_SECRET', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'].filter(key => !process.env[key])
+  if (missing.length) throw new Error(`Missing production environment variables: ${missing.join(', ')}`)
+  if (!path.isAbsolute(dataDir)) throw new Error('DATA_DIR must be an absolute persistent storage path in production.')
+  if (adminPassword.length < 12) throw new Error('ADMIN_PASSWORD must be at least 12 characters in production.')
+  if (sessionSecret.length < 32) throw new Error('SESSION_SECRET must be at least 32 characters in production.')
+}
 
 const seedCategories = [
   { id: 'woody', nameEn: 'Woody', nameAr: 'خشبي' },
@@ -40,7 +50,7 @@ const seedProducts = [
 
 function initialStore() {
   return {
-    categories: seedCategories,
+    categories: seedCategories.map(category => ({ ...category })),
     products: seedProducts.map(([id, name, subtitle, category, price, stock, notes, description, image, accent, sizes]) => ({ id, name, subtitle, category: String(category).toLowerCase(), price, stock, notes, description, images: [image, image], sizes, active: true, accent })),
     orders: [],
     pendingCheckouts: [],
@@ -52,8 +62,8 @@ function slugify(value) {
 }
 
 function normalizeCategory(input, existing = {}) {
-  const nameEn = String(input.nameEn ?? existing.nameEn ?? '').trim()
-  const nameAr = String(input.nameAr ?? existing.nameAr ?? '').trim()
+  const nameEn = String(input?.nameEn ?? existing.nameEn ?? '').trim().slice(0, 80)
+  const nameAr = String(input?.nameAr ?? existing.nameAr ?? '').trim().slice(0, 80)
   if (!nameEn || !nameAr) throw new Error('Category needs both an English name and an Arabic name.')
   return { ...existing, ...input, id: existing.id || input.id || slugify(nameEn), nameEn, nameAr }
 }
@@ -73,6 +83,8 @@ function migrateStore(store) {
   }
   store.categories = categories.map(category => normalizeCategory(category))
   store.products = Array.isArray(store.products) ? store.products : []
+  store.orders = Array.isArray(store.orders) ? store.orders : []
+  store.pendingCheckouts = Array.isArray(store.pendingCheckouts) ? store.pendingCheckouts : []
   return store
 }
 
@@ -107,6 +119,42 @@ function currentAdmin(req) {
   try { const value = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')); return value.exp > Date.now() ? value : null } catch { return null }
 }
 function requireAdmin(req, res) { const admin = currentAdmin(req); if (!admin) { json(res, 401, { error: 'Admin authentication required.' }); return null } return admin }
+const loginAttempts = new Map()
+function clientAddress(req) { return String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim() }
+function allowLoginAttempt(req) {
+  const key = clientAddress(req)
+  const now = Date.now()
+  const current = loginAttempts.get(key)
+  if (!current || current.resetAt <= now) { loginAttempts.set(key, { count: 1, resetAt: now + 15 * 60 * 1000 }); return true }
+  if (current.count >= 8) return false
+  current.count += 1
+  return true
+}
+function clearLoginAttempts(req) { loginAttempts.delete(clientAddress(req)) }
+function normalizeCustomer(input) {
+  const customer = {
+    name: String(input?.name || '').trim().slice(0, 120),
+    email: String(input?.email || '').trim().toLowerCase().slice(0, 254),
+    phone: String(input?.phone || '').trim().slice(0, 40),
+    address: String(input?.address || '').trim().slice(0, 240),
+    notes: String(input?.notes || '').trim().slice(0, 1000),
+  }
+  if (!customer.name || !customer.phone || !customer.address || !/^\S+@\S+\.\S+$/.test(customer.email)) throw new Error('Complete valid customer details before checkout.')
+  return customer
+}
+function orderLinesForStore(store, inputLines) {
+  if (!Array.isArray(inputLines) || !inputLines.length || inputLines.length > 50) throw new Error('Add at least one product to the cart.')
+  return inputLines.map(line => {
+    const product = store.products.find(item => item.id === line.productId && item.active)
+    if (!product) throw new Error('One of the selected products is unavailable.')
+    const quantity = Number(line.quantity)
+    const size = Number(line.size || product.sizes[0])
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) throw new Error('Product quantity is invalid.')
+    if (!product.sizes.includes(size)) throw new Error('Product size is invalid.')
+    if (quantity > product.stock) throw new Error(`${product.name} does not have enough stock.`)
+    return { productId: product.id, size, quantity, price: product.price }
+  })
+}
 function body(req) {
   return new Promise((resolve, reject) => {
     let raw = ''
@@ -130,19 +178,33 @@ function safeImage(dataUrl) {
   if (!match) throw new Error('Unsupported image format.')
   const extension = match[1] === 'jpeg' ? 'jpg' : match[1]
   const file = `${crypto.randomUUID()}.${extension}`
-  fs.writeFileSync(path.join(uploadDir, file), Buffer.from(match[2], 'base64'))
+  const buffer = Buffer.from(match[2], 'base64')
+  if (buffer.length > 5 * 1024 * 1024) throw new Error('Product images must be 5 MB or smaller.')
+  fs.writeFileSync(path.join(uploadDir, file), buffer)
   return `/uploads/${file}`
 }
-function normalizeProduct(input, existing = {}) {
+function normalizeProduct(input, existing = {}, categories = []) {
   const image = safeImage(input.images?.[0] || existing.images?.[0])
   if (!image) throw new Error('A product image is required.')
+  if (!/^https?:\/\//i.test(image) && !image.startsWith('/uploads/')) throw new Error('Product image must be an HTTPS URL or an uploaded image.')
+  const name = String(input.name ?? existing.name ?? '').trim().slice(0, 120)
+  const subtitle = String(input.subtitle ?? existing.subtitle ?? '').trim().slice(0, 180)
+  const description = String(input.description ?? existing.description ?? '').trim().slice(0, 2000)
+  const price = Number(input.price ?? existing.price)
+  const stock = Number(input.stock ?? existing.stock)
+  const sizes = Array.isArray(input.sizes) && input.sizes.length ? input.sizes.map(Number) : (existing.sizes || [50, 75, 100])
+  const category = String(input.category || existing.category || 'woody')
+  if (!name || !subtitle || !description) throw new Error('Product name, short description, and description are required.')
+  if (!Number.isFinite(price) || price <= 0 || price > 1000000) throw new Error('Product price must be greater than 0.')
+  if (!Number.isInteger(stock) || stock < 0 || stock > 1000000) throw new Error('Product stock must be a whole number from 0 upward.')
+  if (!categories.some(item => item.id === category)) throw new Error('Choose a valid category.')
+  if (!sizes.length || sizes.some(size => !Number.isInteger(size) || size <= 0 || size > 10000)) throw new Error('Product sizes must be positive whole numbers.')
   return {
     ...existing,
     ...input,
-    id: existing.id || input.id || `${String(input.name || 'product').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}-${Date.now()}`,
-    price: Number(input.price || 0), stock: Number(input.stock || 0), notes: Array.isArray(input.notes) ? input.notes.filter(Boolean) : [],
-    category: String(input.category || existing.category || 'woody'),
-    sizes: Array.isArray(input.sizes) && input.sizes.length ? input.sizes.map(Number) : [50, 75, 100], images: [image, image], active: input.active !== false,
+    id: existing.id || input.id || `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}-${Date.now()}`,
+    name, subtitle, description, price, stock, notes: Array.isArray(input.notes) ? input.notes.map(note => String(note).trim().slice(0, 80)).filter(Boolean).slice(0, 20) : [],
+    category, sizes, images: [image, image], active: input.active !== false,
   }
 }
 function checkoutOrigin(req) {
@@ -152,6 +214,10 @@ function checkoutOrigin(req) {
 }
 function createPaidOrder(store, draft, sessionId) {
   if (store.orders.some(order => order.paymentSessionId === sessionId)) return null
+  for (const line of draft.lines) {
+    const product = store.products.find(item => item.id === line.productId)
+    if (product) product.stock = Math.max(0, product.stock - line.quantity)
+  }
   const order = { id: `FL-${Date.now().toString().slice(-8)}`, date: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }), customer: draft.customer, lines: draft.lines, total: draft.total, status: 'Pending', paymentStatus: 'Paid', paymentSessionId: sessionId }
   store.orders.unshift(order)
   store.pendingCheckouts = store.pendingCheckouts.filter(item => item.id !== draft.id)
@@ -171,8 +237,10 @@ const server = http.createServer(async (req, res) => {
   try {
     if (route === '/api/health') return json(res, 200, { ok: true, service: 'fragrance-land', time: new Date().toISOString() })
     if (route === '/api/auth/login' && req.method === 'POST') {
+      if (!allowLoginAttempt(req)) return json(res, 429, { error: 'Too many login attempts. Try again later.' })
       const input = await body(req)
       if (input.email !== adminEmail || input.password !== adminPassword) return json(res, 401, { error: 'Incorrect admin email or password.' })
+      clearLoginAttempts(req)
       res.writeHead(200, { 'Content-Type': 'application/json', 'Set-Cookie': `fl_session=${encodeURIComponent(tokenFor(adminEmail))}; HttpOnly; Path=/; SameSite=Lax; Max-Age=28800${process.env.NODE_ENV === 'production' ? '; Secure' : ''}` }); return res.end(JSON.stringify({ email: adminEmail }))
     }
     if (route === '/api/auth/logout' && req.method === 'POST') { res.writeHead(200, { 'Content-Type': 'application/json', 'Set-Cookie': 'fl_session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0' }); return res.end(JSON.stringify({ ok: true })) }
@@ -184,9 +252,13 @@ const server = http.createServer(async (req, res) => {
       try { event = stripe.webhooks.constructEvent(raw, req.headers['stripe-signature'], stripeWebhookSecret) } catch (error) { res.writeHead(400); return res.end(`Webhook Error: ${error.message}`) }
       if (event.type === 'checkout.session.completed' || event.type === 'checkout.session.async_payment_succeeded') {
         const session = event.data.object
-        const store = readStore()
-        const draft = store.pendingCheckouts.find(item => item.id === session.metadata?.draftId)
-        if (draft) createPaidOrder(store, draft, session.id)
+        const isPaid = event.type === 'checkout.session.async_payment_succeeded' || session.payment_status === 'paid'
+        if (isPaid) {
+          const store = readStore()
+          const draft = store.pendingCheckouts.find(item => item.id === session.metadata?.draftId)
+          if (draft) createPaidOrder(store, draft, session.id)
+          else console.warn('Stripe payment received without a matching checkout draft:', session.id)
+        }
       }
       return json(res, 200, { received: true })
     }
@@ -214,17 +286,17 @@ const server = http.createServer(async (req, res) => {
     }
     if (route === '/api/products' && req.method === 'GET') return json(res, 200, store.products.filter(product => product.active))
     if (route === '/api/products/all' && req.method === 'GET') { if (!requireAdmin(req, res)) return; return json(res, 200, store.products) }
-    if (route === '/api/products' && req.method === 'POST') { if (!requireAdmin(req, res)) return; const input = await body(req); if (!store.categories.some(category => category.id === input.category)) return json(res, 400, { error: 'Choose a valid category.' }); const product = normalizeProduct(input); store.products.push(product); writeStore(store); return json(res, 201, product) }
+    if (route === '/api/products' && req.method === 'POST') { if (!requireAdmin(req, res)) return; const input = await body(req); const product = normalizeProduct(input, {}, store.categories); store.products.push(product); writeStore(store); return json(res, 201, product) }
     const productMatch = route.match(/^\/api\/products\/([^/]+)$/)
-    if (productMatch && req.method === 'PUT') { if (!requireAdmin(req, res)) return; const index = store.products.findIndex(product => product.id === productMatch[1]); if (index < 0) return json(res, 404, { error: 'Product not found.' }); const input = await body(req); if (!store.categories.some(category => category.id === input.category)) return json(res, 400, { error: 'Choose a valid category.' }); const product = normalizeProduct(input, store.products[index]); store.products[index] = product; writeStore(store); return json(res, 200, product) }
+    if (productMatch && req.method === 'PUT') { if (!requireAdmin(req, res)) return; const index = store.products.findIndex(product => product.id === productMatch[1]); if (index < 0) return json(res, 404, { error: 'Product not found.' }); const input = await body(req); const product = normalizeProduct(input, store.products[index], store.categories); store.products[index] = product; writeStore(store); return json(res, 200, product) }
     if (productMatch && req.method === 'DELETE') { if (!requireAdmin(req, res)) return; store.products = store.products.filter(product => product.id !== productMatch[1]); writeStore(store); return noContent(res) }
     if (route === '/api/checkout/session' && req.method === 'POST') {
       if (!stripe) return json(res, 503, { error: 'Stripe payments are not configured yet.' })
       const input = await body(req)
-      if (!input.customer?.name || !input.customer?.email || !input.customer?.phone || !input.customer?.address || !Array.isArray(input.lines) || !input.lines.length) return json(res, 400, { error: 'Complete customer details and add at least one product.' })
-      const lines = input.lines.map(line => { const product = store.products.find(item => item.id === line.productId && item.active); if (!product) throw new Error('One of the selected products is unavailable.'); const quantity = Math.max(1, Number(line.quantity || 1)); return { productId: product.id, size: Number(line.size || product.sizes[0]), quantity, price: product.price } })
+      const customer = normalizeCustomer(input.customer)
+      const lines = orderLinesForStore(store, input.lines)
       const total = lines.reduce((sum, line) => sum + line.price * line.quantity, 0)
-      const draft = { id: crypto.randomUUID(), customer: input.customer, lines, total, createdAt: new Date().toISOString() }
+      const draft = { id: crypto.randomUUID(), customer, lines, total, createdAt: new Date().toISOString() }
       store.pendingCheckouts.unshift(draft)
       writeStore(store)
       try {
@@ -247,24 +319,24 @@ const server = http.createServer(async (req, res) => {
         throw error
       }
     }
-    if (route === '/api/orders' && req.method === 'POST') {
-      const input = await body(req)
-      if (!input.customer?.name || !input.customer?.email || !input.customer?.phone || !input.customer?.address || !Array.isArray(input.lines) || !input.lines.length) return json(res, 400, { error: 'Complete customer details and add at least one product.' })
-      const lines = input.lines.map(line => { const product = store.products.find(item => item.id === line.productId && item.active); if (!product) throw new Error('One of the selected products is unavailable.'); const quantity = Math.max(1, Number(line.quantity || 1)); return { productId: product.id, size: Number(line.size || product.sizes[0]), quantity, price: product.price } })
-      const total = lines.reduce((sum, line) => sum + line.price * line.quantity, 0)
-      const order = { id: `FL-${Date.now().toString().slice(-8)}`, date: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }), customer: input.customer, lines, total, status: 'Pending' }
-      store.orders.unshift(order); writeStore(store); return json(res, 201, order)
-    }
     if (route === '/api/orders' && req.method === 'GET') { if (!requireAdmin(req, res)) return; return json(res, 200, store.orders) }
     const orderMatch = route.match(/^\/api\/orders\/([^/]+)$/)
-    if (orderMatch && req.method === 'PATCH') { if (!requireAdmin(req, res)) return; const input = await body(req); const order = store.orders.find(item => item.id === orderMatch[1]); if (!order) return json(res, 404, { error: 'Order not found.' }); order.status = input.status; writeStore(store); return json(res, 200, order) }
-    if (route.startsWith('/uploads/')) return serveFile(req, res, path.join(uploadDir, path.basename(route)))
+    if (orderMatch && req.method === 'PATCH') { if (!requireAdmin(req, res)) return; const input = await body(req); const order = store.orders.find(item => item.id === orderMatch[1]); if (!order) return json(res, 404, { error: 'Order not found.' }); if (!['Pending', 'Processing', 'Shipped', 'Completed', 'Cancelled'].includes(input.status)) return json(res, 400, { error: 'Invalid order status.' }); order.status = input.status; writeStore(store); return json(res, 200, order) }
+    if (route.startsWith('/uploads/')) {
+      const fileName = path.basename(route)
+      const storedFile = path.join(uploadDir, fileName)
+      const legacyFile = path.join(legacyUploadDir, fileName)
+      return serveFile(req, res, fs.existsSync(storedFile) ? storedFile : legacyFile)
+    }
     if (req.method === 'GET') {
       const requestedFile = path.join(distDir, route === '/' ? 'index.html' : route.slice(1))
       return serveFile(req, res, fs.existsSync(requestedFile) && fs.statSync(requestedFile).isFile() ? requestedFile : path.join(distDir, 'index.html'))
     }
     return json(res, 404, { error: 'Not found.' })
-  } catch (error) { return json(res, 400, { error: error.message || 'Request failed.' }) }
+  } catch (error) {
+    console.error('Request failed:', error?.message || error)
+    return json(res, 400, { error: isProduction ? 'Request failed. Please try again.' : (error.message || 'Request failed.') })
+  }
 })
 
 server.listen(port, '0.0.0.0', () => console.log(`Fragrance Land local server running at http://localhost:${port}`))
