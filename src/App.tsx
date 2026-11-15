@@ -4,6 +4,12 @@ import ProductsAdminV2 from './ProductsAdmin'
 type View = 'shop' | 'cart' | 'orders' | 'products' | 'admin'
 type OrderStatus = 'Pending' | 'Processing' | 'Shipped' | 'Completed' | 'Cancelled'
 
+export type Category = {
+  id: string
+  nameEn: string
+  nameAr: string
+}
+
 export type Product = {
   id: string
   name: string
@@ -31,6 +37,12 @@ type Order = {
 
 const logo = '/assets/fragrance-land-logo.png'
 const fallbackImage = 'https://images.unsplash.com/photo-1541643600914-78b084683601?auto=format&fit=crop&w=1200&q=85'
+const starterCategories: Category[] = [
+  { id: 'woody', nameEn: 'Woody', nameAr: 'خشبي' },
+  { id: 'floral', nameEn: 'Floral', nameAr: 'زهري' },
+  { id: 'fresh', nameEn: 'Fresh', nameAr: 'منعش' },
+  { id: 'oriental', nameEn: 'Oriental', nameAr: 'شرقي' },
+]
 
 const starterProducts: Product[] = [
   {
@@ -87,6 +99,7 @@ function icon(name: 'search' | 'bag' | 'arrow' | 'plus' | 'minus' | 'close' | 'e
 }
 
 function money(value: number) { return `AED ${value.toFixed(2)}` }
+function categoryLabel(id: string, categories: Category[]) { const category = categories.find(item => item.id === id); return category ? `${category.nameEn} · ${category.nameAr}` : id }
 function getView() { const path = window.location.pathname; return path === '/admin' || path === '/admin/' ? 'admin' : path.includes('cart') ? 'cart' : path.includes('orders') ? 'orders' : path.includes('products') ? 'products' : 'shop' as View }
 async function apiJson<T>(url: string, options: RequestInit = {}) {
   const response = await fetch(url, { credentials: 'include', ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } })
@@ -98,6 +111,7 @@ async function apiJson<T>(url: string, options: RequestInit = {}) {
 export default function App() {
   const [view, setView] = useState<View>(getView())
   const [products, setProducts] = useState<Product[]>(starterProducts)
+  const [categories, setCategories] = useState<Category[]>(starterCategories)
   const [orders, setOrders] = useState<Order[]>([])
   const [cart, setCart] = usePersistentState<CartLine[]>('fl-cart', [])
   const [activeProduct, setActiveProduct] = useState<Product | null>(null)
@@ -130,13 +144,13 @@ export default function App() {
 
   useEffect(() => {
     let alive = true
-    apiJson<Product[]>('/api/products').then(remoteProducts => { if (alive) setProducts(remoteProducts) }).catch(() => undefined)
+    Promise.all([apiJson<Product[]>('/api/products'), apiJson<Category[]>('/api/categories')]).then(([remoteProducts, remoteCategories]) => { if (alive) { setProducts(remoteProducts); setCategories(remoteCategories) } }).catch(() => undefined)
     apiJson<{ email: string }>('/api/auth/me').then(async () => {
       if (!alive) return
       setAdminMode(true)
-      const [allProducts, remoteOrders] = await Promise.all([apiJson<Product[]>('/api/products/all'), apiJson<Order[]>('/api/orders')])
+      const [allProducts, remoteOrders, remoteCategories] = await Promise.all([apiJson<Product[]>('/api/products/all'), apiJson<Order[]>('/api/orders'), apiJson<Category[]>('/api/categories/all')])
       if (alive) {
-        setProducts(allProducts); setOrders(remoteOrders)
+        setProducts(allProducts); setOrders(remoteOrders); setCategories(remoteCategories)
         if (getView() === 'admin') { window.history.replaceState({}, '', '/orders'); setView('orders') }
       }
     }).catch(() => undefined)
@@ -193,8 +207,8 @@ export default function App() {
   async function loginAdmin(email: string, password: string) {
     try {
       await apiJson('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })
-      const [allProducts, remoteOrders] = await Promise.all([apiJson<Product[]>('/api/products/all'), apiJson<Order[]>('/api/orders')])
-      setProducts(allProducts); setOrders(remoteOrders); setAdminMode(true); setShowLogin(false); setAuthError(''); navigate('orders')
+      const [allProducts, remoteOrders, remoteCategories] = await Promise.all([apiJson<Product[]>('/api/products/all'), apiJson<Order[]>('/api/orders'), apiJson<Category[]>('/api/categories/all')])
+      setProducts(allProducts); setOrders(remoteOrders); setCategories(remoteCategories); setAdminMode(true); setShowLogin(false); setAuthError(''); navigate('orders')
     } catch (error) { setAuthError(error instanceof Error ? error.message : 'Unable to sign in.') }
   }
 
@@ -214,6 +228,17 @@ export default function App() {
     setProducts(current => current.filter(product => product.id !== id))
   }
 
+  async function saveCategory(category: Category) {
+    const exists = categories.some(item => item.id === category.id)
+    const saved = await apiJson<Category>(exists ? `/api/categories/${category.id}` : '/api/categories', { method: exists ? 'PUT' : 'POST', body: JSON.stringify(category) })
+    setCategories(current => exists ? current.map(item => item.id === saved.id ? saved : item) : [...current, saved])
+  }
+
+  async function deleteCategory(id: string) {
+    await apiJson(`/api/categories/${id}`, { method: 'DELETE' })
+    setCategories(current => current.filter(category => category.id !== id))
+  }
+
   async function updateOrderStatus(id: string, status: OrderStatus) {
     const updated = await apiJson<Order>(`/api/orders/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) })
     setOrders(current => current.map(order => order.id === updated.id ? updated : order))
@@ -221,14 +246,14 @@ export default function App() {
 
   return <div className="app-shell">
     <Header view={view} cartCount={cartCount} adminMode={adminMode} onNavigate={navigate} onLogout={logoutAdmin} />
-    {view === 'shop' && <Shop products={activeProducts} onProduct={openProduct} onNavigate={navigate} />}
-    {view === 'cart' && <Cart products={products} cart={cart} total={cartTotal} onUpdate={updateLine} onNavigate={navigate} onSubmit={submitOrder} />}
+    {view === 'shop' && <Shop products={activeProducts} categories={categories} onProduct={openProduct} onNavigate={navigate} />}
+    {view === 'cart' && <Cart products={products} categories={categories} cart={cart} total={cartTotal} onUpdate={updateLine} onNavigate={navigate} onSubmit={submitOrder} />}
     {view === 'orders' && adminMode && <Orders orders={orders} products={products} onStatus={updateOrderStatus} />}
-    {view === 'products' && adminMode && <ProductsAdminV2 products={products} onSave={saveProduct} onDelete={deleteProduct} />}
+    {view === 'products' && adminMode && <ProductsAdminV2 products={products} categories={categories} onSave={saveProduct} onDelete={deleteProduct} onSaveCategory={saveCategory} onDeleteCategory={deleteCategory} />}
     {view === 'admin' && !adminMode && <AdminLocked onSignIn={() => { setAuthError(''); setShowLogin(true) }} />}
     {(view === 'orders' || view === 'products') && !adminMode && <AdminRouteGuard onNavigate={navigate} />}
     {showLogin && view === 'admin' && <AdminLogin onClose={() => setShowLogin(false)} onLogin={loginAdmin} error={authError} />}
-    {activeProduct && <ProductModal product={activeProduct} selectedSize={selectedSize} selectedQuantity={selectedQuantity} onSize={setSelectedSize} onQuantity={setSelectedQuantity} onClose={() => setActiveProduct(null)} onAdd={() => addToCart(activeProduct.id, selectedSize, selectedQuantity)} />}
+    {activeProduct && <ProductModal product={activeProduct} categories={categories} selectedSize={selectedSize} selectedQuantity={selectedQuantity} onSize={setSelectedSize} onQuantity={setSelectedQuantity} onClose={() => setActiveProduct(null)} onAdd={() => addToCart(activeProduct.id, selectedSize, selectedQuantity)} />}
     {notice && <div className="toast"><span className="toast-icon">{icon('check')}</span>{notice}</div>}
   </div>
 }
@@ -250,19 +275,19 @@ function Header({ view, cartCount, adminMode, onNavigate, onLogout }: { view: Vi
   </header>
 }
 
-function Shop({ products, onProduct, onNavigate }: { products: Product[]; onProduct: (product: Product) => void; onNavigate: (view: View) => void }) {
+function Shop({ products, categories, onProduct, onNavigate }: { products: Product[]; categories: Category[]; onProduct: (product: Product) => void; onNavigate: (view: View) => void }) {
   const [query, setQuery] = useState('')
-  const [category, setCategory] = useState('All')
-  const categories = ['All', ...Array.from(new Set(products.map(product => product.category)))]
-  const filtered = products.filter(product => (category === 'All' || product.category === category) && `${product.name} ${product.subtitle} ${product.notes.join(' ')}`.toLowerCase().includes(query.toLowerCase()))
+  const [category, setCategory] = useState('all')
+  const visibleCategories = categories.filter(item => products.some(product => product.category === item.id))
+  const filtered = products.filter(product => (category === 'all' || product.category === category) && `${product.name} ${product.subtitle} ${product.notes.join(' ')}`.toLowerCase().includes(query.toLowerCase()))
   return <main>
     <section className="hero section-wrap">
       <div className="hero-copy"><p className="eyebrow">Fragrance, beautifully composed</p><h1>Find the scent<br /><em>that feels like you.</em></h1><p className="hero-description">Thoughtfully blended fragrances for every version of your day. Explore a considered collection of modern signatures.</p><button className="button button-dark" onClick={() => document.getElementById('collection')?.scrollIntoView({ behavior: 'smooth' })}>Explore the collection {icon('arrow')}</button></div>
       <div className="hero-art"><div className="hero-orb orb-one" /><div className="hero-orb orb-two" /><div className="hero-bottle"><span className="bottle-cap" /><span className="bottle-label">FL<br /><small>NO. 01</small></span></div><div className="hero-caption">A little ritual<br /><strong>for every day.</strong></div></div>
     </section>
     <section id="collection" className="collection section-wrap"><div className="section-heading"><div><p className="eyebrow">The collection</p><h2>Made to be remembered.</h2></div><button className="text-button" onClick={() => onNavigate('cart')}>View your cart {icon('arrow')}</button></div>
-      <div className="catalog-tools"><div className="search-field">{icon('search')}<input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search by scent or note" aria-label="Search products" /></div><div className="category-tabs">{categories.map(item => <button key={item} className={category === item ? 'category-tab active' : 'category-tab'} onClick={() => setCategory(item)}>{item}</button>)}</div></div>
-      <div className="product-grid">{filtered.map(product => <ProductCard key={product.id} product={product} onClick={() => onProduct(product)} />)}</div>
+      <div className="catalog-tools"><div className="search-field">{icon('search')}<input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search by scent or note" aria-label="Search products" /></div><div className="category-tabs"><button className={category === 'all' ? 'category-tab active' : 'category-tab'} onClick={() => setCategory('all')}>All · الكل</button>{visibleCategories.map(item => <button key={item.id} className={category === item.id ? 'category-tab active' : 'category-tab'} onClick={() => setCategory(item.id)}>{categoryLabel(item.id, categories)}</button>)}</div></div>
+      <div className="product-grid">{filtered.map(product => <ProductCard key={product.id} product={product} categoryText={categoryLabel(product.category, categories)} onClick={() => onProduct(product)} />)}</div>
       {!filtered.length && <div className="empty-state"><span>{icon('sparkle')}</span><h3>No scents found.</h3><p>Try a different name, note or category.</p></div>}
     </section>
     <section className="brand-story section-wrap"><div className="story-mark">{icon('sparkle')}</div><div><p className="eyebrow">The Fragrance Land point of view</p><h2>Small rituals.<br /><em>Beautifully yours.</em></h2></div><p>We believe fragrance should feel personal, never precious. Every blend is made to meet you where you are — and stay with you a little longer.</p></section>
@@ -270,11 +295,11 @@ function Shop({ products, onProduct, onNavigate }: { products: Product[]; onProd
   </main>
 }
 
-function ProductCard({ product, onClick }: { product: Product; onClick: () => void }) { return <button className="product-card" onClick={onClick}><div className="product-visual" style={{ '--accent': product.accent } as CSSProperties}><img src={product.images[0]} alt={product.name} loading="lazy" /><span className="product-tag">{product.category}</span><span className="quick-view">Quick view {icon('arrow')}</span></div><div className="product-card-meta"><div><h3>{product.name}</h3><p>{product.subtitle}</p></div><strong>{money(product.price)}</strong></div></button> }
+function ProductCard({ product, categoryText, onClick }: { product: Product; categoryText: string; onClick: () => void }) { return <button className="product-card" onClick={onClick}><div className="product-visual" style={{ '--accent': product.accent } as CSSProperties}><img src={product.images[0]} alt={product.name} loading="lazy" /><span className="product-tag">{categoryText}</span><span className="quick-view">Quick view {icon('arrow')}</span></div><div className="product-card-meta"><div><h3>{product.name}</h3><p>{product.subtitle}</p></div><strong>{money(product.price)}</strong></div></button> }
 
-function ProductModal({ product, selectedSize, selectedQuantity, onSize, onQuantity, onClose, onAdd }: { product: Product; selectedSize: number; selectedQuantity: number; onSize: (size: number) => void; onQuantity: (quantity: number) => void; onClose: () => void; onAdd: () => void }) { return <div className="modal-backdrop" role="presentation" onMouseDown={event => event.target === event.currentTarget && onClose()}><div className="product-modal" role="dialog" aria-modal="true" aria-label={product.name}><button className="modal-close" onClick={onClose} aria-label="Close product details">{icon('close')}</button><div className="modal-gallery"><img src={product.images[0]} alt={product.name} /><div className="gallery-dots"><span className="active" /><span /><span /></div></div><div className="modal-content"><p className="eyebrow">{product.category} / Fragrance Land</p><h2>{product.name}</h2><p className="modal-subtitle">{product.subtitle}</p><p className="modal-description">{product.description}</p><div className="notes"><p className="label">The notes</p><div>{product.notes.map(note => <span key={note}>{note}</span>)}</div></div><div className="modal-option"><p className="label">Size</p><div className="size-options">{product.sizes.map(size => <button key={size} className={selectedSize === size ? 'size-option active' : 'size-option'} onClick={() => onSize(size)}>{size} ml</button>)}</div></div><div className="modal-buy"><div className="quantity-control"><button onClick={() => onQuantity(Math.max(1, selectedQuantity - 1))} aria-label="Decrease quantity">{icon('minus')}</button><span>{selectedQuantity}</span><button onClick={() => onQuantity(selectedQuantity + 1)} aria-label="Increase quantity">{icon('plus')}</button></div><button className="button button-dark add-button" onClick={onAdd}>Add to cart <span>{money(product.price * selectedQuantity)}</span></button></div></div></div></div> }
+function ProductModal({ product, categories, selectedSize, selectedQuantity, onSize, onQuantity, onClose, onAdd }: { product: Product; categories: Category[]; selectedSize: number; selectedQuantity: number; onSize: (size: number) => void; onQuantity: (quantity: number) => void; onClose: () => void; onAdd: () => void }) { return <div className="modal-backdrop" role="presentation" onMouseDown={event => event.target === event.currentTarget && onClose()}><div className="product-modal" role="dialog" aria-modal="true" aria-label={product.name}><button className="modal-close" onClick={onClose} aria-label="Close product details">{icon('close')}</button><div className="modal-gallery"><img src={product.images[0]} alt={product.name} /><div className="gallery-dots"><span className="active" /><span /><span /></div></div><div className="modal-content"><p className="eyebrow">{categoryLabel(product.category, categories)} / Fragrance Land</p><h2>{product.name}</h2><p className="modal-subtitle">{product.subtitle}</p><p className="modal-description">{product.description}</p><div className="notes"><p className="label">The notes</p><div>{product.notes.map(note => <span key={note}>{note}</span>)}</div></div><div className="modal-option"><p className="label">Size</p><div className="size-options">{product.sizes.map(size => <button key={size} className={selectedSize === size ? 'size-option active' : 'size-option'} onClick={() => onSize(size)}>{size} ml</button>)}</div></div><div className="modal-buy"><div className="quantity-control"><button onClick={() => onQuantity(Math.max(1, selectedQuantity - 1))} aria-label="Decrease quantity">{icon('minus')}</button><span>{selectedQuantity}</span><button onClick={() => onQuantity(selectedQuantity + 1)} aria-label="Increase quantity">{icon('plus')}</button></div><button className="button button-dark add-button" onClick={onAdd}>Add to cart <span>{money(product.price * selectedQuantity)}</span></button></div></div></div></div> }
 
-function Cart({ products, cart, total, onUpdate, onNavigate, onSubmit }: { products: Product[]; cart: CartLine[]; total: number; onUpdate: (line: CartLine, quantity: number) => void; onNavigate: (view: View) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) { return <main className="page-wrap"><div className="page-intro"><p className="eyebrow">Your collection</p><h1>Take your favorites<br /><em>home with you.</em></h1></div>{cart.length === 0 ? <div className="empty-cart"><div className="empty-cart-mark">{icon('bag')}</div><h2>Your cart is waiting.</h2><p>Start with one scent and see where it takes you.</p><button className="button button-dark" onClick={() => onNavigate('shop')}>Explore perfumes {icon('arrow')}</button></div> : <div className="cart-layout"><section className="cart-lines"><div className="cart-section-title"><h2>Selected scents</h2><span>{cart.length} {cart.length === 1 ? 'item' : 'items'}</span></div>{cart.map(line => { const product = products.find(item => item.id === line.productId); if (!product) return null; return <div className="cart-line" key={`${line.productId}-${line.size}`}><img src={product.images[0]} alt={product.name} /><div className="cart-line-info"><p className="eyebrow">{product.category}</p><h3>{product.name}</h3><p>{line.size} ml · {money(product.price)}</p></div><div className="quantity-control"><button onClick={() => onUpdate(line, line.quantity - 1)} aria-label="Decrease quantity">{icon('minus')}</button><span>{line.quantity}</span><button onClick={() => onUpdate(line, line.quantity + 1)} aria-label="Increase quantity">{icon('plus')}</button></div><strong>{money(product.price * line.quantity)}</strong><button className="remove-button" onClick={() => onUpdate(line, 0)}>Remove</button></div>})}<button className="text-button back-button" onClick={() => onNavigate('shop')}>← Continue shopping</button></section><section className="checkout-card"><div className="checkout-summary"><div><span>Subtotal</span><strong>{money(total)}</strong></div><div><span>Delivery</span><strong className="free">Complimentary</strong></div><div className="total-row"><span>Total</span><strong>{money(total)}</strong></div></div><div className="checkout-divider" /><form onSubmit={onSubmit}><div className="checkout-title"><p className="eyebrow">Almost yours</p><h2>Delivery details</h2></div><label>Full name<input required name="name" placeholder="Your name" /></label><label>Email address<input required type="email" name="email" placeholder="you@example.com" /></label><div className="form-row"><label>Phone<input required name="phone" placeholder="+971" /></label><label>Address<input required name="address" placeholder="City, area" /></label></div><label>Notes <span className="optional">optional</span><textarea name="notes" placeholder="Anything we should know?"></textarea></label><button className="button button-dark full-button" type="submit">Continue to secure payment {icon('arrow')}</button><p className="secure-note">Secure payment powered by Stripe.</p></form></section></div>}</main> }
+function Cart({ products, categories, cart, total, onUpdate, onNavigate, onSubmit }: { products: Product[]; categories: Category[]; cart: CartLine[]; total: number; onUpdate: (line: CartLine, quantity: number) => void; onNavigate: (view: View) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) { return <main className="page-wrap"><div className="page-intro"><p className="eyebrow">Your collection</p><h1>Take your favorites<br /><em>home with you.</em></h1></div>{cart.length === 0 ? <div className="empty-cart"><div className="empty-cart-mark">{icon('bag')}</div><h2>Your cart is waiting.</h2><p>Start with one scent and see where it takes you.</p><button className="button button-dark" onClick={() => onNavigate('shop')}>Explore perfumes {icon('arrow')}</button></div> : <div className="cart-layout"><section className="cart-lines"><div className="cart-section-title"><h2>Selected scents</h2><span>{cart.length} {cart.length === 1 ? 'item' : 'items'}</span></div>{cart.map(line => { const product = products.find(item => item.id === line.productId); if (!product) return null; return <div className="cart-line" key={`${line.productId}-${line.size}`}><img src={product.images[0]} alt={product.name} /><div className="cart-line-info"><p className="eyebrow">{categoryLabel(product.category, categories)}</p><h3>{product.name}</h3><p>{line.size} ml · {money(product.price)}</p></div><div className="quantity-control"><button onClick={() => onUpdate(line, line.quantity - 1)} aria-label="Decrease quantity">{icon('minus')}</button><span>{line.quantity}</span><button onClick={() => onUpdate(line, line.quantity + 1)} aria-label="Increase quantity">{icon('plus')}</button></div><strong>{money(product.price * line.quantity)}</strong><button className="remove-button" onClick={() => onUpdate(line, 0)}>Remove</button></div>})}<button className="text-button back-button" onClick={() => onNavigate('shop')}>← Continue shopping</button></section><section className="checkout-card"><div className="checkout-summary"><div><span>Subtotal</span><strong>{money(total)}</strong></div><div><span>Delivery</span><strong className="free">Complimentary</strong></div><div className="total-row"><span>Total</span><strong>{money(total)}</strong></div></div><div className="checkout-divider" /><form onSubmit={onSubmit}><div className="checkout-title"><p className="eyebrow">Almost yours</p><h2>Delivery details</h2></div><label>Full name<input required name="name" placeholder="Your name" /></label><label>Email address<input required type="email" name="email" placeholder="you@example.com" /></label><div className="form-row"><label>Phone<input required name="phone" placeholder="+971" /></label><label>Address<input required name="address" placeholder="City, area" /></label></div><label>Notes <span className="optional">optional</span><textarea name="notes" placeholder="Anything we should know?"></textarea></label><button className="button button-dark full-button" type="submit">Continue to secure payment {icon('arrow')}</button><p className="secure-note">Secure payment powered by Stripe.</p></form></section></div>}</main> }
 
 function Orders({ orders, products, onStatus }: { orders: Order[]; products: Product[]; onStatus: (id: string, status: OrderStatus) => void }) { return <main className="admin-page page-wrap"><div className="admin-intro"><div><p className="eyebrow">Admin / Operations</p><h1>Orders <em>coming in.</em></h1></div><div className="admin-stat"><span>{orders.filter(order => order.status === 'Pending').length}</span><small>awaiting attention</small></div></div><div className="admin-table"><div className="table-head"><span>Order</span><span>Customer</span><span>Items</span><span>Total</span><span>Status</span></div>{orders.map(order => <div className="table-row" key={order.id}><div><strong>{order.id}</strong><small>{order.date}</small></div><div><strong>{order.customer.name}</strong><small>{order.customer.email}</small></div><div><strong>{order.lines.reduce((sum, line) => sum + line.quantity, 0)} items</strong><small>{order.lines.map(line => products.find(product => product.id === line.productId)?.name).join(', ')}</small></div><strong>{money(order.total)}</strong><select className={`status-select ${order.status.toLowerCase()}`} value={order.status} onChange={event => onStatus(order.id, event.target.value as OrderStatus)}>{(['Pending', 'Processing', 'Shipped', 'Completed', 'Cancelled'] as OrderStatus[]).map(status => <option key={status}>{status}</option>)}</select></div>)}</div></main> }
 
