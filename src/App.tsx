@@ -171,11 +171,21 @@ export default function App() {
   useEffect(() => {
     const payment = new URLSearchParams(window.location.search).get('payment')
     if (payment === 'success') {
-      setCart([])
-      setNotice('Payment received — your order is on its way to the studio.')
-      window.history.replaceState({}, '', '/')
-      setView('shop')
-      window.setTimeout(() => setNotice(''), 4000)
+      const sessionId = new URLSearchParams(window.location.search).get('session_id')
+      void (async () => {
+        let confirmed = false
+        try {
+          if (sessionId) {
+            await apiJson(`/api/checkout/complete?session_id=${encodeURIComponent(sessionId)}`)
+            confirmed = true
+          }
+        } catch { /* Stripe webhook delivery may still be completing in the background. */ }
+        setCart([])
+        setNotice(confirmed ? 'Payment received — your order is on its way to the studio.' : 'Payment received — we are confirming your order with the studio.')
+        window.history.replaceState({}, '', '/')
+        setView('shop')
+        window.setTimeout(() => setNotice(''), 4500)
+      })()
     } else if (payment === 'cancelled') {
       setNotice('Payment was cancelled. Your cart is still waiting for you.')
       window.history.replaceState({}, '', '/cart')
