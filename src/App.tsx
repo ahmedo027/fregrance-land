@@ -86,7 +86,7 @@ function icon(name: 'search' | 'bag' | 'arrow' | 'plus' | 'minus' | 'close' | 'e
   return <svg viewBox="0 0 24 24" aria-hidden="true" dangerouslySetInnerHTML={{ __html: paths[name] }} />
 }
 
-function money(value: number) { return `$${value.toFixed(2)}` }
+function money(value: number) { return `AED ${value.toFixed(2)}` }
 function getView() { const path = window.location.pathname; return path === '/admin' || path === '/admin/' ? 'admin' : path.includes('cart') ? 'cart' : path.includes('orders') ? 'orders' : path.includes('products') ? 'products' : 'shop' as View }
 async function apiJson<T>(url: string, options: RequestInit = {}) {
   const response = await fetch(url, { credentials: 'include', ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } })
