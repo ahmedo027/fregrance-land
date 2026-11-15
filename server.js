@@ -224,6 +224,16 @@ function createPaidOrder(store, draft, sessionId) {
   writeStore(store)
   return order
 }
+function completeStripeSession(session) {
+  const store = readStore()
+  const draftId = session.metadata?.draftId
+  const draft = store.pendingCheckouts.find(item => item.id === draftId || item.sessionId === session.id)
+  if (!draft) {
+    console.warn('Stripe payment received without a matching checkout draft:', session.id)
+    return null
+  }
+  return createPaidOrder(store, draft, session.id)
+}
 function serveFile(req, res, filePath) {
   if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) { res.writeHead(404); res.end('Not found'); return }
   const ext = path.extname(filePath).toLowerCase()
@@ -253,14 +263,18 @@ const server = http.createServer(async (req, res) => {
       if (event.type === 'checkout.session.completed' || event.type === 'checkout.session.async_payment_succeeded') {
         const session = event.data.object
         const isPaid = event.type === 'checkout.session.async_payment_succeeded' || session.payment_status === 'paid'
-        if (isPaid) {
-          const store = readStore()
-          const draft = store.pendingCheckouts.find(item => item.id === session.metadata?.draftId)
-          if (draft) createPaidOrder(store, draft, session.id)
-          else console.warn('Stripe payment received without a matching checkout draft:', session.id)
-        }
+        if (isPaid) completeStripeSession(session)
       }
       return json(res, 200, { received: true })
+    }
+    if (route === '/api/checkout/complete' && req.method === 'GET') {
+      if (!stripe) return json(res, 503, { error: 'Stripe payments are not configured yet.' })
+      const sessionId = requestUrl.searchParams.get('session_id') || ''
+      if (!/^cs_[A-Za-z0-9_]+$/.test(sessionId)) return json(res, 400, { error: 'Invalid checkout session.' })
+      const session = await stripe.checkout.sessions.retrieve(sessionId)
+      if (session.payment_status !== 'paid') return json(res, 409, { error: 'Payment has not been confirmed yet.' })
+      const order = completeStripeSession(session)
+      return json(res, 200, { ok: true, created: Boolean(order) })
     }
     const store = readStore()
     if (route === '/api/categories' && req.method === 'GET') return json(res, 200, store.categories)
