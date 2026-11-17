@@ -1,5 +1,5 @@
 import { type ChangeEvent, type FormEvent, useState } from 'react'
-import type { Category, Product } from './App'
+import type { Category, Product, SizeOption } from './App'
 
 type Props = {
   products: Product[]
@@ -12,8 +12,10 @@ type Props = {
 
 const emptyProduct = (categories: Category[]): Product => ({
   id: '', name: '', subtitle: '', category: categories[0]?.id || '', price: 120, stock: 10,
-  notes: [''], description: '', images: ['', ''], sizes: [50, 75, 100], active: true, accent: '#c8753c',
+  notes: [''], description: '', images: ['', ''], sizes: [{ value: 50, unit: 'ml' }, { value: 75, unit: 'ml' }, { value: 100, unit: 'ml' }], discountPercent: 0, active: true, accent: '#c8753c',
 })
+
+const blankSize = (): SizeOption => ({ value: 50, unit: 'ml' })
 
 function categoryLabel(id: string, categories: Category[]) {
   const category = categories.find(item => item.id === id)
@@ -39,12 +41,16 @@ export default function ProductsAdminV2({ products, categories, onSave, onDelete
   }
 
   function edit(product: Product) {
-    setDraft(product)
+    setDraft({ ...product, sizes: product.sizes.length ? product.sizes : [blankSize()], discountPercent: product.discountPercent || 0 })
     setEditing(true)
     setImageSource(product.images[0]?.startsWith('data:') ? 'upload' : 'url')
     setImageError('')
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
+
+  function addSize() { setDraft(current => ({ ...current, sizes: [...current.sizes, blankSize()] })) }
+  function updateSize(index: number, change: Partial<SizeOption>) { setDraft(current => ({ ...current, sizes: current.sizes.map((size, sizeIndex) => sizeIndex === index ? { ...size, ...change } : size) })) }
+  function removeSize(index: number) { setDraft(current => ({ ...current, sizes: current.sizes.length <= 1 ? current.sizes : current.sizes.filter((_, sizeIndex) => sizeIndex !== index) })) }
 
   function handleImageUpload(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
@@ -87,14 +93,15 @@ export default function ProductsAdminV2({ products, categories, onSave, onDelete
         <label>Product name<input required value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} placeholder="e.g. Rose Atelier" /></label>
         <label>Short description<input required value={draft.subtitle} onChange={event => setDraft({ ...draft, subtitle: event.target.value })} placeholder="A warm, polished signature" /></label>
         <div className="form-row"><label>Category<select required value={draft.category} onChange={event => setDraft({ ...draft, category: event.target.value })}>{categories.map(category => <option key={category.id} value={category.id}>{categoryLabel(category.id, categories)}</option>)}</select></label><label>Price<input required type="number" min="0" value={draft.price} onChange={event => setDraft({ ...draft, price: Number(event.target.value) })} /></label></div>
-        <div className="form-row"><label>Stock<input required type="number" min="0" value={draft.stock} onChange={event => setDraft({ ...draft, stock: Number(event.target.value) })} /></label><label>Accent color<input type="color" value={draft.accent} onChange={event => setDraft({ ...draft, accent: event.target.value })} /></label></div>
+        <div className="form-row"><label>Stock<input required type="number" min="0" value={draft.stock} onChange={event => setDraft({ ...draft, stock: Number(event.target.value) })} /></label><label>Discount %<input type="number" min="0" max="99" value={draft.discountPercent} onChange={event => setDraft({ ...draft, discountPercent: Number(event.target.value) })} /><span className="field-hint">0–99% off</span></label></div>
+        <div className="sizes-editor"><div className="sizes-editor-heading"><div><p className="field-label">Available sizes</p><p className="field-hint">Choose the sizes customers can select for this product.</p></div><button type="button" className="text-button" onClick={addSize}>＋ Add size</button></div>{draft.sizes.map((size, index) => <div className="size-editor-row" key={`${index}-${size.unit}`}><input required type="number" min="1" max="10000" value={size.value} onChange={event => updateSize(index, { value: Number(event.target.value) })} aria-label={`Size ${index + 1} amount`} /><select value={size.unit} onChange={event => updateSize(index, { unit: event.target.value as SizeOption['unit'] })} aria-label={`Size ${index + 1} unit`}><option value="ml">ml</option><option value="g">g</option></select>{draft.sizes.length > 1 && <button type="button" className="icon-button danger" onClick={() => removeSize(index)} aria-label={`Remove size ${index + 1}`}>×</button>}</div>)}</div>
         <div className="image-source-field"><p className="field-label">Product image</p><div className="image-source-tabs"><button type="button" className={imageSource === 'upload' ? 'image-source-tab active' : 'image-source-tab'} onClick={() => { setImageSource('upload'); setImageError('') }}>Upload from computer</button><button type="button" className={imageSource === 'url' ? 'image-source-tab active' : 'image-source-tab'} onClick={() => { setImageSource('url'); setImageError('') }}>Use image URL</button></div>{imageSource === 'upload' ? <><input className="file-input" type="file" accept="image/*" onChange={handleImageUpload} /><p className="field-hint">Choose a JPG, PNG or WEBP image from your computer.</p></> : <input value={draft.images[0]} onChange={event => { setDraft({ ...draft, images: [event.target.value, draft.images[1] || event.target.value] }); setImageError('') }} placeholder="https://..." />}{draft.images[0] && <div className="image-preview"><img src={draft.images[0]} alt="Product preview" /><span>{imageSource === 'upload' ? 'Uploaded image preview' : 'URL image preview'}</span></div>}{imageError && <p className="field-error">{imageError}</p>}</div>
         <label>Fragrance notes<input value={draft.notes.join(', ')} onChange={event => setDraft({ ...draft, notes: event.target.value.split(',').map(note => note.trim()) })} placeholder="Sandalwood, Rose, Amber" /></label>
         <label>Description<textarea required value={draft.description} onChange={event => setDraft({ ...draft, description: event.target.value })} placeholder="Tell customers how it feels..."></textarea></label>
         <label className="checkbox-label"><input type="checkbox" checked={draft.active} onChange={event => setDraft({ ...draft, active: event.target.checked })} /> Visible in shop</label>
         <button className="button button-dark full-button" type="submit">{editing ? 'Save changes' : 'Add to catalog'} <span aria-hidden="true">→</span></button>{saved && <p className="saved-message">✓ Saved successfully.</p>}
       </form>
-      <div className="admin-product-list"><div className="list-heading"><h2>Catalog</h2><span>{products.length} products</span></div>{products.map(product => <div className="admin-product-row" key={product.id}><img src={product.images[0]} alt="" /><div><strong>{product.name}</strong><small>{categoryLabel(product.category, categories)} · {product.stock} in stock</small></div><span className={product.active ? 'active-dot' : 'inactive-dot'}>{product.active ? 'Live' : 'Hidden'}</span><button className="icon-button" onClick={() => edit(product)} aria-label={`Edit ${product.name}`}>{actionIcon('edit')}</button><button className="icon-button danger" onClick={() => onDelete(product.id)} aria-label={`Delete ${product.name}`}>{actionIcon('trash')}</button></div>)}</div>
+      <div className="admin-product-list"><div className="list-heading"><h2>Catalog</h2><span>{products.length} products</span></div>{products.map(product => <div className="admin-product-row" key={product.id}><img src={product.images[0]} alt="" /><div><strong>{product.name}</strong><small>{categoryLabel(product.category, categories)} · {product.stock} in stock · {product.sizes.map(size => `${size.value}${size.unit}`).join(', ')}</small></div><span className={product.active ? 'active-dot' : 'inactive-dot'}>{product.active ? 'Live' : 'Hidden'}</span><button className="icon-button" onClick={() => edit(product)} aria-label={`Edit ${product.name}`}>{actionIcon('edit')}</button><button className="icon-button danger" onClick={() => onDelete(product.id)} aria-label={`Delete ${product.name}`}>{actionIcon('trash')}</button></div>)}</div>
     </div>
   </main>
 }
