@@ -51,11 +51,27 @@ const seedProducts = [
 function initialStore() {
   return {
     categories: seedCategories.map(category => ({ ...category })),
-    products: seedProducts.map(([id, name, subtitle, category, price, stock, notes, description, image, accent, sizes]) => ({ id, name, subtitle, category: String(category).toLowerCase(), price, stock, notes, description, images: [image, image], sizes, active: true, accent })),
+    products: seedProducts.map(([id, name, subtitle, category, price, stock, notes, description, image, accent, sizes]) => ({ id, name, subtitle, category: String(category).toLowerCase(), price, stock, notes, description, images: [image, image], sizes: normalizeSizes(sizes), discountPercent: 0, active: true, accent })),
     orders: [],
     pendingCheckouts: [],
   }
 }
+
+function normalizeSizeOption(size) {
+  if (size && typeof size === 'object') return { value: Number(size.value), unit: size.unit === 'g' ? 'g' : 'ml' }
+  return { value: Number(size), unit: 'ml' }
+}
+
+function normalizeSizes(input, fallback = [50, 75, 100]) {
+  const source = Array.isArray(input) && input.length ? input : fallback
+  const seen = new Set()
+  return source.map(normalizeSizeOption).filter(size => Number.isInteger(size.value) && size.value > 0 && size.value <= 10000).filter(size => { const key = `${size.value}-${size.unit}`; if (seen.has(key)) return false; seen.add(key); return true })
+}
+
+function sizeKey(size) { const normalized = normalizeSizeOption(size); return `${normalized.value}-${normalized.unit}` }
+function sizeLabel(size) { const normalized = normalizeSizeOption(size); return `${normalized.value} ${normalized.unit}` }
+function normalizeDiscount(value) { const discount = Number(value || 0); return Number.isFinite(discount) ? Math.min(99, Math.max(0, Math.round(discount))) : 0 }
+function productPrice(product) { return Number((Number(product.price) * (1 - normalizeDiscount(product.discountPercent) / 100)).toFixed(2)) }
 
 function slugify(value) {
   return String(value || 'category').trim().toLowerCase().normalize('NFKD').replace(/[^\p{L}\p{N}\s-]/gu, '').replace(/[\s_-]+/g, '-').replace(/^-+|-+$/g, '') || `category-${Date.now()}`
@@ -82,8 +98,8 @@ function migrateStore(store) {
     product.category = custom.id
   }
   store.categories = categories.map(category => normalizeCategory(category))
-  store.products = Array.isArray(store.products) ? store.products : []
-  store.orders = Array.isArray(store.orders) ? store.orders : []
+  store.products = Array.isArray(store.products) ? store.products.map(product => ({ ...product, sizes: normalizeSizes(product.sizes), discountPercent: normalizeDiscount(product.discountPercent) })) : []
+  store.orders = Array.isArray(store.orders) ? store.orders.map(order => ({ ...order, lines: Array.isArray(order.lines) ? order.lines.map(line => ({ ...line, size: normalizeSizeOption(line.size) })) : [] })) : []
   store.pendingCheckouts = Array.isArray(store.pendingCheckouts) ? store.pendingCheckouts : []
   return store
 }
@@ -148,11 +164,11 @@ function orderLinesForStore(store, inputLines) {
     const product = store.products.find(item => item.id === line.productId && item.active)
     if (!product) throw new Error('One of the selected products is unavailable.')
     const quantity = Number(line.quantity)
-    const size = Number(line.size || product.sizes[0])
+    const size = normalizeSizeOption(line.size || product.sizes[0])
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) throw new Error('Product quantity is invalid.')
-    if (!product.sizes.includes(size)) throw new Error('Product size is invalid.')
+    if (!product.sizes.some(option => sizeKey(option) === sizeKey(size))) throw new Error('Product size is invalid.')
     if (quantity > product.stock) throw new Error(`${product.name} does not have enough stock.`)
-    return { productId: product.id, size, quantity, price: product.price }
+    return { productId: product.id, size, quantity, price: productPrice(product) }
   })
 }
 function body(req) {
@@ -192,19 +208,21 @@ function normalizeProduct(input, existing = {}, categories = []) {
   const description = String(input.description ?? existing.description ?? '').trim().slice(0, 2000)
   const price = Number(input.price ?? existing.price)
   const stock = Number(input.stock ?? existing.stock)
-  const sizes = Array.isArray(input.sizes) && input.sizes.length ? input.sizes.map(Number) : (existing.sizes || [50, 75, 100])
+  const sizes = normalizeSizes(input.sizes ?? existing.sizes)
+  const discountPercent = normalizeDiscount(input.discountPercent ?? existing.discountPercent)
   const category = String(input.category || existing.category || 'woody')
   if (!name || !subtitle || !description) throw new Error('Product name, short description, and description are required.')
   if (!Number.isFinite(price) || price <= 0 || price > 1000000) throw new Error('Product price must be greater than 0.')
   if (!Number.isInteger(stock) || stock < 0 || stock > 1000000) throw new Error('Product stock must be a whole number from 0 upward.')
   if (!categories.some(item => item.id === category)) throw new Error('Choose a valid category.')
-  if (!sizes.length || sizes.some(size => !Number.isInteger(size) || size <= 0 || size > 10000)) throw new Error('Product sizes must be positive whole numbers.')
+  if (!sizes.length) throw new Error('Add at least one valid product size.')
+  if (discountPercent < 0 || discountPercent > 99) throw new Error('Discount must be between 0 and 99 percent.')
   return {
     ...existing,
     ...input,
     id: existing.id || input.id || `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}-${Date.now()}`,
     name, subtitle, description, price, stock, notes: Array.isArray(input.notes) ? input.notes.map(note => String(note).trim().slice(0, 80)).filter(Boolean).slice(0, 20) : [],
-    category, sizes, images: [image, image], active: input.active !== false,
+    category, sizes, discountPercent, images: [image, image], active: input.active !== false,
   }
 }
 function checkoutOrigin(req) {
@@ -316,7 +334,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const session = await stripe.checkout.sessions.create({
           mode: 'payment',
-          line_items: lines.map(line => { const product = store.products.find(item => item.id === line.productId); return { price_data: { currency: 'aed', product_data: { name: `${product.name} · ${line.size} ml`, description: product.subtitle }, unit_amount: Math.round(line.price * 100) }, quantity: line.quantity } }),
+          line_items: lines.map(line => { const product = store.products.find(item => item.id === line.productId); return { price_data: { currency: 'aed', product_data: { name: `${product.name} · ${sizeLabel(line.size)}`, description: product.subtitle }, unit_amount: Math.round(line.price * 100) }, quantity: line.quantity } }),
           customer_email: input.customer.email,
           phone_number_collection: { enabled: true },
           billing_address_collection: 'required',
