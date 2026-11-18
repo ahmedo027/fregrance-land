@@ -39,19 +39,12 @@ const seedCategories = [
   { id: 'oriental', nameEn: 'Oriental', nameAr: 'شرقي' },
 ]
 
-const seedProducts = [
-  ['santal-21', 'Santal 21', 'A warm, polished signature', 'Woody', 148, 18, ['Sandalwood', 'Cardamom', 'Amber'], 'A quiet statement of warm sandalwood, bright cardamom and a skin-like amber dry down. Designed to linger close and leave a memorable trail.', 'https://images.unsplash.com/photo-1547887538-e3a2f32cb1cc?auto=format&fit=crop&w=1200&q=85', '#c8753c', [50, 75, 100]],
-  ['orange-blossom', 'Orange Blossom', 'Sunlit citrus, soft petals', 'Floral', 122, 24, ['Neroli', 'Orange blossom', 'Musk'], 'A luminous floral built around fresh neroli and orange blossom, softened with clean musk and a hint of green leaves.', 'https://images.unsplash.com/photo-1594035910387-fea47794261f?auto=format&fit=crop&w=1200&q=85', '#efaa62', [50, 75, 100]],
-  ['velvet-oud', 'Velvet Oud', 'Deep, smoky and magnetic', 'Oriental', 176, 9, ['Oud', 'Rose', 'Saffron'], 'An enveloping composition where smoky oud meets crimson rose and a thread of saffron. Bold, velvety and made for evening.', 'https://images.unsplash.com/photo-1592945403244-b3fbafd7f539?auto=format&fit=crop&w=1200&q=85', '#722e2a', [50, 75]],
-  ['fig-leaf', 'Fig Leaf', 'Green, creamy, effortless', 'Fresh', 118, 32, ['Fig leaf', 'Cedar', 'Coconut'], 'The softness of ripe fig with crisp green leaves and a creamy cedar base. An easy, everyday veil for warm days.', 'https://images.unsplash.com/photo-1588405748880-12d1d2a0c2e4?auto=format&fit=crop&w=1200&q=85', '#8b9867', [50, 75, 100]],
-  ['iris-noir', 'Iris Noir', 'Powdered elegance, reimagined', 'Floral', 154, 14, ['Iris', 'Violet', 'Tonka'], 'A modern iris with the coolness of violet and the soft warmth of tonka bean. Powdery, poised, and never predictable.', 'https://images.unsplash.com/photo-1523293182086-7651a899d37f?auto=format&fit=crop&w=1200&q=85', '#82739d', [50, 75, 100]],
-  ['sea-salt', 'Sea Salt', 'Air, mineral and light', 'Fresh', 106, 27, ['Sea salt', 'Bergamot', 'Driftwood'], 'A clean mineral scent that opens with sparkling bergamot before settling into sun-warmed driftwood and salt-kissed skin.', 'https://images.unsplash.com/photo-1610461888750-10bfc601b8a5?auto=format&fit=crop&w=1200&q=85', '#7e9aa5', [50, 75, 100]],
-]
+const demoProductIds = new Set(['santal-21', 'orange-blossom', 'velvet-oud', 'fig-leaf', 'iris-noir', 'sea-salt'])
 
 function initialStore() {
   return {
     categories: seedCategories.map(category => ({ ...category })),
-    products: seedProducts.map(([id, name, subtitle, category, price, stock, notes, description, image, accent, sizes]) => ({ id, name, subtitle, category: String(category).toLowerCase(), price, stock, notes, description, images: [image, image], sizes: normalizeSizes(sizes), discountPercent: 0, active: true, accent })),
+    products: [],
     orders: [],
     pendingCheckouts: [],
   }
@@ -98,7 +91,7 @@ function migrateStore(store) {
     product.category = custom.id
   }
   store.categories = categories.map(category => normalizeCategory(category))
-  store.products = Array.isArray(store.products) ? store.products.map(product => ({ ...product, sizes: normalizeSizes(product.sizes), discountPercent: normalizeDiscount(product.discountPercent) })) : []
+  store.products = Array.isArray(store.products) ? store.products.filter(product => !demoProductIds.has(product.id)).map(product => ({ ...product, sizes: normalizeSizes(product.sizes), discountPercent: normalizeDiscount(product.discountPercent) })) : []
   store.orders = Array.isArray(store.orders) ? store.orders.map(order => ({ ...order, lines: Array.isArray(order.lines) ? order.lines.map(line => ({ ...line, size: normalizeSizeOption(line.size) })) : [] })) : []
   store.pendingCheckouts = Array.isArray(store.pendingCheckouts) ? store.pendingCheckouts : []
   return store
@@ -113,7 +106,10 @@ function readStore() {
   try {
     const store = JSON.parse(fs.readFileSync(storePath, 'utf8'))
     store.pendingCheckouts = Array.isArray(store.pendingCheckouts) ? store.pendingCheckouts : []
-    return migrateStore(store)
+    const beforeMigration = JSON.stringify(store)
+    const migrated = migrateStore(store)
+    if (JSON.stringify(migrated) !== beforeMigration) fs.writeFileSync(storePath, JSON.stringify(migrated, null, 2))
+    return migrated
   } catch { return initialStore() }
 }
 
