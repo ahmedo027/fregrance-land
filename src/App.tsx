@@ -44,7 +44,6 @@ type Order = {
 }
 
 const logo = '/assets/fragrance-land-logo.png'
-const fallbackImage = 'https://images.unsplash.com/photo-1541643600914-78b084683601?auto=format&fit=crop&w=1200&q=85'
 const starterCategories: Category[] = [
   { id: 'woody', nameEn: 'Woody', nameAr: 'خشبي' },
   { id: 'floral', nameEn: 'Floral', nameAr: 'زهري' },
@@ -52,44 +51,7 @@ const starterCategories: Category[] = [
   { id: 'oriental', nameEn: 'Oriental', nameAr: 'شرقي' },
 ]
 
-const starterProducts: Product[] = [
-  {
-    id: 'santal-21', name: 'Santal 21', subtitle: 'A warm, polished signature', category: 'Woody', price: 148, stock: 18,
-    notes: ['Sandalwood', 'Cardamom', 'Amber'], description: 'A quiet statement of warm sandalwood, bright cardamom and a skin-like amber dry down. Designed to linger close and leave a memorable trail.',
-    images: ['https://images.unsplash.com/photo-1547887538-e3a2f32cb1cc?auto=format&fit=crop&w=1200&q=85', fallbackImage], sizes: [{ value: 50, unit: 'ml' }, { value: 75, unit: 'ml' }, { value: 100, unit: 'ml' }], discountPercent: 0, active: true, accent: '#c8753c',
-  },
-  {
-    id: 'orange-blossom', name: 'Orange Blossom', subtitle: 'Sunlit citrus, soft petals', category: 'Floral', price: 122, stock: 24,
-    notes: ['Neroli', 'Orange blossom', 'Musk'], description: 'A luminous floral built around fresh neroli and orange blossom, softened with clean musk and a hint of green leaves.',
-    images: ['https://images.unsplash.com/photo-1594035910387-fea47794261f?auto=format&fit=crop&w=1200&q=85', fallbackImage], sizes: [{ value: 50, unit: 'ml' }, { value: 75, unit: 'ml' }, { value: 100, unit: 'ml' }], discountPercent: 0, active: true, accent: '#efaa62',
-  },
-  {
-    id: 'velvet-oud', name: 'Velvet Oud', subtitle: 'Deep, smoky and magnetic', category: 'Oriental', price: 176, stock: 9,
-    notes: ['Oud', 'Rose', 'Saffron'], description: 'An enveloping composition where smoky oud meets crimson rose and a thread of saffron. Bold, velvety and made for evening.',
-    images: ['https://images.unsplash.com/photo-1592945403244-b3fbafd7f539?auto=format&fit=crop&w=1200&q=85', fallbackImage], sizes: [{ value: 50, unit: 'ml' }, { value: 75, unit: 'ml' }], discountPercent: 0, active: true, accent: '#722e2a',
-  },
-  {
-    id: 'fig-leaf', name: 'Fig Leaf', subtitle: 'Green, creamy, effortless', category: 'Fresh', price: 118, stock: 32,
-    notes: ['Fig leaf', 'Cedar', 'Coconut'], description: 'The softness of ripe fig with crisp green leaves and a creamy cedar base. An easy, everyday veil for warm days.',
-    images: ['https://images.unsplash.com/photo-1588405748880-12d1d2a0c2e4?auto=format&fit=crop&w=1200&q=85', fallbackImage], sizes: [{ value: 50, unit: 'ml' }, { value: 75, unit: 'ml' }, { value: 100, unit: 'ml' }], discountPercent: 0, active: true, accent: '#8b9867',
-  },
-  {
-    id: 'iris-noir', name: 'Iris Noir', subtitle: 'Powdered elegance, reimagined', category: 'Floral', price: 154, stock: 14,
-    notes: ['Iris', 'Violet', 'Tonka'], description: 'A modern iris with the coolness of violet and the soft warmth of tonka bean. Powdery, poised, and never predictable.',
-    images: ['https://images.unsplash.com/photo-1523293182086-7651a899d37f?auto=format&fit=crop&w=1200&q=85', fallbackImage], sizes: [{ value: 50, unit: 'ml' }, { value: 75, unit: 'ml' }, { value: 100, unit: 'ml' }], discountPercent: 0, active: true, accent: '#82739d',
-  },
-  {
-    id: 'sea-salt', name: 'Sea Salt', subtitle: 'Air, mineral and light', category: 'Fresh', price: 106, stock: 27,
-    notes: ['Sea salt', 'Bergamot', 'Driftwood'], description: 'A clean mineral scent that opens with sparkling bergamot before settling into sun-warmed driftwood and salt-kissed skin.',
-    images: ['https://images.unsplash.com/photo-1610461888750-10bfc601b8a5?auto=format&fit=crop&w=1200&q=85', fallbackImage], sizes: [{ value: 50, unit: 'ml' }, { value: 75, unit: 'ml' }, { value: 100, unit: 'ml' }], discountPercent: 0, active: true, accent: '#7e9aa5',
-  },
-]
-
-const sampleOrders: Order[] = [
-  { id: 'FL-240816-01', date: '16 Aug 2026', customer: { name: 'Maya Al-Hadi', email: 'maya@example.com', phone: '+971 50 123 4567', address: 'Jumeirah, Dubai', notes: '' }, lines: [{ productId: 'santal-21', size: { value: 75, unit: 'ml' }, quantity: 1 }], total: 148, status: 'Processing' },
-  { id: 'FL-240815-02', date: '15 Aug 2026', customer: { name: 'Omar Rahman', email: 'omar@example.com', phone: '+971 55 879 2210', address: 'Al Barsha, Dubai', notes: 'Please call on arrival.' }, lines: [{ productId: 'orange-blossom', size: { value: 50, unit: 'ml' }, quantity: 1 }, { productId: 'fig-leaf', size: { value: 50, unit: 'ml' }, quantity: 1 }], total: 240, status: 'Pending' },
-  { id: 'FL-240812-03', date: '12 Aug 2026', customer: { name: 'Lina Costa', email: 'lina@example.com', phone: '+971 52 445 0076', address: 'Al Reem Island, Abu Dhabi', notes: '' }, lines: [{ productId: 'velvet-oud', size: { value: 50, unit: 'ml' }, quantity: 1 }], total: 176, status: 'Completed' },
-]
+const starterProducts: Product[] = []
 
 function usePersistentState<T>(key: string, initial: T) {
   const [value, setValue] = useState<T>(() => {
@@ -157,7 +119,7 @@ export default function App() {
 
   useEffect(() => {
     let alive = true
-    Promise.all([apiJson<Product[]>('/api/products'), apiJson<Category[]>('/api/categories')]).then(([remoteProducts, remoteCategories]) => { if (alive) { setProducts(remoteProducts); setCategories(remoteCategories) } }).catch(() => undefined)
+    Promise.all([apiJson<Product[]>('/api/products'), apiJson<Category[]>('/api/categories')]).then(([remoteProducts, remoteCategories]) => { if (alive) { setProducts(remoteProducts); setCategories(remoteCategories); setCart(current => current.filter(line => { const product = remoteProducts.find(item => item.id === line.productId); return Boolean(product?.active && product.sizes.some(size => sizeKey(size) === sizeKey(line.size))) })) } }).catch(() => undefined)
     apiJson<{ email: string }>('/api/auth/me').then(async () => {
       if (!alive) return
       setAdminMode(true)
@@ -320,7 +282,7 @@ function Shop({ products, categories, onProduct, onNavigate }: { products: Produ
     <section id="collection" className="collection section-wrap"><div className="section-heading"><div><p className="eyebrow">The collection</p><h2>Made to be remembered.</h2></div><button className="text-button" onClick={() => onNavigate('cart')}>View your cart {icon('arrow')}</button></div>
       <div className="catalog-tools"><div className="search-field">{icon('search')}<input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search by scent or note" aria-label="Search products" /></div><div className="category-tabs"><button className={category === 'all' ? 'category-tab active' : 'category-tab'} onClick={() => setCategory('all')}>All · الكل</button>{visibleCategories.map(item => <button key={item.id} className={category === item.id ? 'category-tab active' : 'category-tab'} onClick={() => setCategory(item.id)}>{categoryLabel(item.id, categories)}</button>)}</div></div>
       <div className="product-grid">{filtered.map(product => <ProductCard key={product.id} product={product} categoryText={categoryLabel(product.category, categories)} onClick={() => onProduct(product)} />)}</div>
-      {!filtered.length && <div className="empty-state"><span>{icon('sparkle')}</span><h3>No scents found.</h3><p>Try a different name, note or category.</p></div>}
+      {!filtered.length && <div className="empty-state"><span>{icon('sparkle')}</span><h3>{products.length ? 'No scents found.' : 'The collection is being prepared.'}</h3><p>{products.length ? 'Try a different name, note or category.' : 'New fragrances will appear here as the admin adds them.'}</p></div>}
     </section>
     <section className="brand-story section-wrap"><div className="story-mark">{icon('sparkle')}</div><div><p className="eyebrow">The Fragrance Land point of view</p><h2>Small rituals.<br /><em>Beautifully yours.</em></h2></div><p>We believe fragrance should feel personal, never precious. Every blend is made to meet you where you are — and stay with you a little longer.</p></section>
     <Footer />
