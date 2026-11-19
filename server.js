@@ -151,7 +151,7 @@ function normalizeCustomer(input) {
     address: String(input?.address || '').trim().slice(0, 240),
     notes: String(input?.notes || '').trim().slice(0, 1000),
   }
-  if (!customer.name || !customer.phone || !customer.address || !/^\S+@\S+\.\S+$/.test(customer.email)) throw new Error('Complete valid customer details before checkout.')
+  if (!customer.name || !customer.phone || (customer.email && !/^\S+@\S+\.\S+$/.test(customer.email))) throw new Error('Complete valid customer details before checkout.')
   return customer
 }
 function orderLinesForStore(store, inputLines) {
@@ -331,9 +331,7 @@ const server = http.createServer(async (req, res) => {
         const session = await stripe.checkout.sessions.create({
           mode: 'payment',
           line_items: lines.map(line => { const product = store.products.find(item => item.id === line.productId); return { price_data: { currency: 'aed', product_data: { name: `${product.name} · ${sizeLabel(line.size)}`, description: product.subtitle }, unit_amount: Math.round(line.price * 100) }, quantity: line.quantity } }),
-          customer_email: input.customer.email,
-          phone_number_collection: { enabled: true },
-          billing_address_collection: 'required',
+          customer_email: customer.email || undefined,
           metadata: { draftId: draft.id },
           success_url: `${checkoutOrigin(req)}/?payment=success&session_id={CHECKOUT_SESSION_ID}`,
           cancel_url: `${checkoutOrigin(req)}/cart?payment=cancelled`,
