@@ -33,7 +33,7 @@ The project uses a server-side Supabase state table and a public product-image b
 Set these variables in Render. `SUPABASE_SECRET_KEY` is a server-only secret; never put it in React/Vite variables or commit it to GitHub. If your project still shows the older key format, `SUPABASE_SERVICE_ROLE_KEY` is also accepted by the server.
 
 ```text
-SUPABASE_URL=https://abswgdopccgxmykgwqsx.supabase.co
+SUPABASE_URL=https://naxtlwpqopvzncxdysed.supabase.co
 SUPABASE_SECRET_KEY=your-server-only-supabase-secret-key
 SUPABASE_STORAGE_BUCKET=fragrance-products
 ```
