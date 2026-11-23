@@ -74,7 +74,7 @@ export default function ProductsAdminV2({ products, categories, onSave, onDelete
       setImageError('Add an image by uploading a file or entering an image URL.')
       return
     }
-    const product = { ...draft, id: draft.id || `${draft.name.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`, notes: draft.notes.filter(Boolean) }
+    const product = { ...draft, id: draft.id || crypto.randomUUID(), notes: draft.notes.filter(Boolean) }
     try { await onSave(product) } catch (error) { setImageError(error instanceof Error ? error.message : 'Unable to save product.'); return }
     setDraft(emptyProduct(categories))
     setEditing(false)
