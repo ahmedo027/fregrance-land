@@ -21,9 +21,9 @@ const stripeSecretKey = process.env.STRIPE_SECRET_KEY || ''
 const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET || ''
 const isProduction = process.env.NODE_ENV === 'production'
 const stripe = stripeSecretKey ? new Stripe(stripeSecretKey) : null
-const supabaseUrl = process.env.SUPABASE_URL || ''
-const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || ''
-const supabaseStorageBucket = process.env.SUPABASE_STORAGE_BUCKET || 'fragrance-products'
+const supabaseUrl = String(process.env.SUPABASE_URL || '').trim().replace(/\/+$/, '')
+const supabaseSecretKey = String(process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
+const supabaseStorageBucket = String(process.env.SUPABASE_STORAGE_BUCKET || 'fragrance-products').trim() || 'fragrance-products'
 const supabase = supabaseUrl && supabaseSecretKey
   ? createClient(supabaseUrl, supabaseSecretKey, { auth: { autoRefreshToken: false, persistSession: false } })
   : null
