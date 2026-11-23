@@ -347,22 +347,24 @@ const server = http.createServer(async (req, res) => {
     const categoryMatch = route.match(/^\/api\/categories\/([^/]+)$/)
     if (categoryMatch && req.method === 'PUT') {
       if (!requireAdmin(req, res)) return
-      const index = store.categories.findIndex(category => category.id === categoryMatch[1])
+      const categoryId = decodeURIComponent(categoryMatch[1])
+      const index = store.categories.findIndex(category => category.id === categoryId)
       if (index < 0) return json(res, 404, { error: 'Category not found.' })
       const category = normalizeCategory(await body(req), store.categories[index])
       store.categories[index] = category; await writeStore(store); return json(res, 200, category)
     }
     if (categoryMatch && req.method === 'DELETE') {
       if (!requireAdmin(req, res)) return
-      if (store.products.some(product => product.category === categoryMatch[1])) return json(res, 409, { error: 'This category is used by a product. Reassign those products before deleting it.' })
-      store.categories = store.categories.filter(category => category.id !== categoryMatch[1]); await writeStore(store); return noContent(res)
+      const categoryId = decodeURIComponent(categoryMatch[1])
+      if (store.products.some(product => product.category === categoryId)) return json(res, 409, { error: 'This category is used by a product. Reassign those products before deleting it.' })
+      store.categories = store.categories.filter(category => category.id !== categoryId); await writeStore(store); return noContent(res)
     }
     if (route === '/api/products' && req.method === 'GET') return json(res, 200, store.products.filter(product => product.active))
     if (route === '/api/products/all' && req.method === 'GET') { if (!requireAdmin(req, res)) return; return json(res, 200, store.products) }
     if (route === '/api/products' && req.method === 'POST') { if (!requireAdmin(req, res)) return; const input = await body(req); const product = await normalizeProduct(input, {}, store.categories); store.products.push(product); await writeStore(store); return json(res, 201, product) }
     const productMatch = route.match(/^\/api\/products\/([^/]+)$/)
-    if (productMatch && req.method === 'PUT') { if (!requireAdmin(req, res)) return; const index = store.products.findIndex(product => product.id === productMatch[1]); if (index < 0) return json(res, 404, { error: 'Product not found.' }); const input = await body(req); const product = await normalizeProduct(input, store.products[index], store.categories); store.products[index] = product; await writeStore(store); return json(res, 200, product) }
-    if (productMatch && req.method === 'DELETE') { if (!requireAdmin(req, res)) return; store.products = store.products.filter(product => product.id !== productMatch[1]); await writeStore(store); return noContent(res) }
+    if (productMatch && req.method === 'PUT') { if (!requireAdmin(req, res)) return; const productId = decodeURIComponent(productMatch[1]); const index = store.products.findIndex(product => product.id === productId); if (index < 0) return json(res, 404, { error: 'Product not found.' }); const input = await body(req); const product = await normalizeProduct(input, store.products[index], store.categories); store.products[index] = product; await writeStore(store); return json(res, 200, product) }
+    if (productMatch && req.method === 'DELETE') { if (!requireAdmin(req, res)) return; const productId = decodeURIComponent(productMatch[1]); store.products = store.products.filter(product => product.id !== productId); await writeStore(store); return noContent(res) }
     if (route === '/api/checkout/session' && req.method === 'POST') {
       if (!stripe) return json(res, 503, { error: 'Stripe payments are not configured yet.' })
       const input = await body(req)
@@ -392,7 +394,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (route === '/api/orders' && req.method === 'GET') { if (!requireAdmin(req, res)) return; return json(res, 200, store.orders) }
     const orderMatch = route.match(/^\/api\/orders\/([^/]+)$/)
-    if (orderMatch && req.method === 'PATCH') { if (!requireAdmin(req, res)) return; const input = await body(req); const order = store.orders.find(item => item.id === orderMatch[1]); if (!order) return json(res, 404, { error: 'Order not found.' }); if (!['Pending', 'Processing', 'Shipped', 'Completed', 'Cancelled'].includes(input.status)) return json(res, 400, { error: 'Invalid order status.' }); order.status = input.status; await writeStore(store); return json(res, 200, order) }
+    if (orderMatch && req.method === 'PATCH') { if (!requireAdmin(req, res)) return; const orderId = decodeURIComponent(orderMatch[1]); const input = await body(req); const order = store.orders.find(item => item.id === orderId); if (!order) return json(res, 404, { error: 'Order not found.' }); if (!['Pending', 'Processing', 'Shipped', 'Completed', 'Cancelled'].includes(input.status)) return json(res, 400, { error: 'Invalid order status.' }); order.status = input.status; await writeStore(store); return json(res, 200, order) }
     if (route.startsWith('/uploads/')) {
       const fileName = path.basename(route)
       const storedFile = path.join(uploadDir, fileName)
