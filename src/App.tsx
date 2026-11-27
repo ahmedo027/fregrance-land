@@ -1,7 +1,8 @@
 import { type CSSProperties, type FormEvent, useEffect, useState } from 'react'
 import ProductsAdminV2 from './ProductsAdmin'
+import AccountantTest from './AccountantTest'
 
-type View = 'shop' | 'cart' | 'orders' | 'products' | 'admin'
+type View = 'shop' | 'cart' | 'orders' | 'products' | 'accountant-test' | 'admin'
 type OrderStatus = 'Pending' | 'Processing' | 'Shipped' | 'Completed' | 'Cancelled'
 
 export type Category = {
@@ -29,6 +30,8 @@ export type Product = {
   discountPercent: number
   active: boolean
   accent: string
+  productionCost?: number
+  packagingCost?: number
 }
 
 type CartLine = { productId: string; size: SizeOption; quantity: number }
@@ -77,8 +80,8 @@ function productPrice(product: Product) { return product.price * (1 - (product.d
 function shippingFeeForCountry(country: string) { return country === 'AE' ? 25 : 80 }
 function priceMarkup(product: Product, quantity = 1) { const sale = productPrice(product) * quantity; return product.discountPercent > 0 ? <><del>{money(product.price * quantity)}</del> <span className="sale-price">{money(sale)}</span></> : money(sale) }
 function categoryLabel(id: string, categories: Category[]) { const category = categories.find(item => item.id === id); return category ? `${category.nameEn} · ${category.nameAr}` : id }
-function getView() { const path = window.location.pathname; return path === '/admin' || path === '/admin/' ? 'admin' : path.includes('cart') ? 'cart' : path.includes('orders') ? 'orders' : path.includes('products') ? 'products' : 'shop' as View }
-async function apiJson<T>(url: string, options: RequestInit = {}) {
+function getView(): View { const path = window.location.pathname; return path === '/admin' || path === '/admin/' ? 'admin' : path === '/accountant-test' || path === '/accountant-test/' ? 'accountant-test' : path.includes('cart') ? 'cart' : path.includes('orders') ? 'orders' : path.includes('products') ? 'products' : 'shop' }
+export async function apiJson<T>(url: string, options: RequestInit = {}) {
   const response = await fetch(url, { credentials: 'include', ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } })
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(payload.error || 'Request failed.')
@@ -246,8 +249,9 @@ export default function App() {
     {view === 'cart' && <Cart products={products} categories={categories} cart={cart} total={cartTotal} onUpdate={updateLine} onNavigate={navigate} onSubmit={submitOrder} />}
     {view === 'orders' && adminMode && <Orders orders={orders} products={products} onStatus={updateOrderStatus} />}
     {view === 'products' && adminMode && <ProductsAdminV2 products={products} categories={categories} onSave={saveProduct} onDelete={deleteProduct} onSaveCategory={saveCategory} onDeleteCategory={deleteCategory} />}
+    {view === 'accountant-test' && adminMode && <AccountantTest products={products} />}
     {view === 'admin' && !adminMode && <AdminLocked onSignIn={() => { setAuthError(''); setShowLogin(true) }} />}
-    {(view === 'orders' || view === 'products') && !adminMode && <AdminRouteGuard onNavigate={navigate} />}
+    {(view === 'orders' || view === 'products' || view === 'accountant-test') && !adminMode && <AdminRouteGuard onNavigate={navigate} />}
     {showLogin && view === 'admin' && <AdminLogin onClose={() => setShowLogin(false)} onLogin={loginAdmin} error={authError} />}
     {activeProduct && <ProductModal product={activeProduct} categories={categories} selectedSize={selectedSize} selectedQuantity={selectedQuantity} onSize={setSelectedSize} onQuantity={setSelectedQuantity} onClose={() => setActiveProduct(null)} onAdd={() => addToCart(activeProduct.id, selectedSize, selectedQuantity)} />}
     {notice && <div className="toast"><span className="toast-icon">{icon('check')}</span>{notice}</div>}
@@ -264,7 +268,7 @@ function Header({ view, cartCount, adminMode, onNavigate, onLogout }: { view: Vi
       <nav className={mobileOpen ? 'main-nav open' : 'main-nav'}>
         <button className={view === 'shop' ? 'nav-link active' : 'nav-link'} onClick={() => nav('shop')}>Shop perfumes</button>
         <button className={view === 'cart' ? 'nav-link cart-nav active' : 'nav-link cart-nav'} onClick={() => nav('cart')} aria-label={`Your cart ${cartCount}`}>{icon('bag')}<span className="cart-count">{cartCount}</span></button>
-        {adminMode && <><span className="nav-divider" /><button className={view === 'orders' ? 'nav-link admin-link active' : 'nav-link admin-link'} onClick={() => nav('orders')}>Orders</button><button className={view === 'products' ? 'nav-link admin-link active' : 'nav-link admin-link'} onClick={() => nav('products')}>Products</button></>}
+        {adminMode && <><span className="nav-divider" /><button className={view === 'orders' ? 'nav-link admin-link active' : 'nav-link admin-link'} onClick={() => nav('orders')}>Orders</button><button className={view === 'products' ? 'nav-link admin-link active' : 'nav-link admin-link'} onClick={() => nav('products')}>Products</button><button className={view === 'accountant-test' ? 'nav-link admin-link active' : 'nav-link admin-link'} onClick={() => nav('accountant-test')}>Accountant</button></>}
         {adminMode && <button className="admin-toggle" onClick={onLogout}>Exit admin</button>}
       </nav>
     </div>
