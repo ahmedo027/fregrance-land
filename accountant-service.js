@@ -17,6 +17,17 @@ const text = (value, max = 500) => String(value ?? '').trim().slice(0, max)
 const validDate = value => /^\d{4}-\d{2}-\d{2}$/.test(String(value || '')) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`))
 const today = () => new Date().toISOString().slice(0, 10)
 const newId = () => crypto.randomUUID()
+const packagingCategories = new Set(['Packaging materials', 'Bottles', 'Boxes'])
+
+function normalizeInventoryMeasurement(rawQuantity, rawUnit, purchasePrice, providedCost) {
+  const sourceUnit = MATERIAL_UNITS.includes(rawUnit) ? rawUnit : 'pieces'
+  const multiplier = sourceUnit === 'liters' || sourceUnit === 'kilograms' ? 1000 : 1
+  const baseUnit = sourceUnit === 'liters' ? 'ml' : sourceUnit === 'kilograms' ? 'grams' : sourceUnit
+  const baseQuantity = quantity(rawQuantity) * multiplier
+  const providedRate = Number(providedCost || 0)
+  const costPerBaseUnit = providedRate > 0 ? money(providedRate / multiplier) : purchasePrice > 0 && baseQuantity > 0 ? money(purchasePrice / baseQuantity) : 0
+  return { baseQuantity, baseUnit, costPerBaseUnit }
+}
 
 function normalizeSize(size) {
   const value = Number(size?.value)
@@ -176,10 +187,13 @@ export function createAccountantService({ supabase, getStore, writeStore, getPro
   function normalizeMaterial(input, existing = {}) {
     const name = text(input?.name ?? existing.name, 160)
     const category = MATERIAL_CATEGORIES.includes(input?.category ?? existing.category) ? (input?.category ?? existing.category) : 'Other'
-    const unit = MATERIAL_UNITS.includes(input?.unit ?? existing.unit) ? (input?.unit ?? existing.unit) : 'pieces'
-    const value = { id: existing.id || newId(), name, category, quantity: quantity(input?.quantity ?? existing.quantity), unit, purchase_price: money(input?.purchasePrice ?? existing.purchase_price), cost_per_unit: money(input?.costPerUnit ?? existing.cost_per_unit), supplier: text(input?.supplier ?? existing.supplier, 160), purchase_date: validDate(input?.purchaseDate ?? existing.purchase_date) ? (input?.purchaseDate ?? existing.purchase_date) : today(), low_stock_threshold: quantity(input?.lowStockThreshold ?? existing.low_stock_threshold) }
+    const sourceQuantity = quantity(input?.quantity ?? existing.quantity)
+    const sourceUnit = MATERIAL_UNITS.includes(input?.unit ?? existing.unit) ? (input?.unit ?? existing.unit) : 'pieces'
+    const purchasePrice = money(input?.purchasePrice ?? existing.purchase_price)
+    const measurement = normalizeInventoryMeasurement(sourceQuantity, sourceUnit, purchasePrice, input?.costPerUnit ?? existing.cost_per_unit)
+    const value = { id: existing.id || newId(), name, category, quantity: measurement.baseQuantity, unit: measurement.baseUnit, purchase_price: purchasePrice, cost_per_unit: measurement.costPerBaseUnit, supplier: text(input?.supplier ?? existing.supplier, 160), purchase_date: validDate(input?.purchaseDate ?? existing.purchase_date) ? (input?.purchaseDate ?? existing.purchase_date) : today(), low_stock_threshold: quantity(input?.lowStockThreshold ?? existing.low_stock_threshold) }
     if (!name) throw new Error('Raw material name is required.')
-    if (value.cost_per_unit <= 0 && value.quantity > 0 && value.purchase_price > 0) value.cost_per_unit = money(value.purchase_price / value.quantity)
+    if (value.quantity <= 0) throw new Error('Material quantity must be greater than zero.')
     return value
   }
 
@@ -288,8 +302,9 @@ export function createAccountantService({ supabase, getStore, writeStore, getPro
       const unitCost = money(material.cost_per_unit)
       return { material, quantity_used: used, unit_cost: unitCost, total_cost: money(used * unitCost) }
     })
-    const rawMaterialCost = money(lines.reduce((sum, line) => sum + line.total_cost, 0))
-    const packagingCost = money(input?.packagingCost)
+    const rawMaterialCost = money(lines.filter(line => !packagingCategories.has(line.material.category)).reduce((sum, line) => sum + line.total_cost, 0))
+    const packagingMaterialCost = money(lines.filter(line => packagingCategories.has(line.material.category)).reduce((sum, line) => sum + line.total_cost, 0))
+    const packagingCost = money(packagingMaterialCost + money(input?.packagingCost))
     const productionCost = money(rawMaterialCost + packagingCost)
     const batch = { id: newId(), product_id: product.id, size_value: size.value, size_unit: size.unit, quantity_produced: produced, raw_material_cost: rawMaterialCost, packaging_cost: packagingCost, production_cost: productionCost, cost_per_finished_product: money(productionCost / produced), batch_date: validDate(input?.batchDate) ? input.batchDate : today(), notes: text(input?.notes, 800), status: input?.confirmed === false ? 'Draft' : 'Confirmed' }
     if (batch.status === 'Confirmed') {
@@ -368,4 +383,3 @@ export function createAccountantService({ supabase, getStore, writeStore, getPro
 
   return { summary, expenses, createExpense, updateExpense, deleteExpense, materials, createMaterial, updateMaterial, deleteMaterial, outsideSales, createOutsideSale, updateOutsideSale, deleteOutsideSale, batches, batchMaterials, createProductionBatch, getInventory, recordMovement, audit }
 }
-
