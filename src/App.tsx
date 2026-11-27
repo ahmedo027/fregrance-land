@@ -102,6 +102,7 @@ export default function App() {
   const [adminMode, setAdminMode] = useState(false)
   const [showLogin, setShowLogin] = useState(false)
   const [authError, setAuthError] = useState('')
+  const [accountantEnabled, setAccountantEnabled] = useState<boolean | null>(null)
 
   const activeProducts = products.filter(product => product.active)
   const cartCount = cart.reduce((sum, line) => sum + line.quantity, 0)
@@ -111,9 +112,10 @@ export default function App() {
   }, 0)
 
   function navigate(next: View) {
-    const path = next === 'shop' ? '/' : next === 'accountant' ? '/admin/accountant' : `/${next}`
+    const target = next === 'accountant' && accountantEnabled === false ? 'shop' : next
+    const path = target === 'shop' ? '/' : target === 'accountant' ? '/admin/accountant' : `/${target}`
     window.history.pushState({}, '', path)
-    setView(next)
+    setView(target)
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
@@ -125,6 +127,11 @@ export default function App() {
 
   useEffect(() => {
     let alive = true
+    apiJson<{ accountantEnabled: boolean }>('/api/config').then(config => {
+      if (!alive) return
+      setAccountantEnabled(config.accountantEnabled)
+      if (!config.accountantEnabled && getView() === 'accountant') { window.history.replaceState({}, '', '/'); setView('shop') }
+    }).catch(() => { if (alive) setAccountantEnabled(true) })
     Promise.all([apiJson<Product[]>('/api/products'), apiJson<Category[]>('/api/categories')]).then(([remoteProducts, remoteCategories]) => { if (alive) { setProducts(remoteProducts); setCategories(remoteCategories); setCart(current => current.filter(line => { const product = remoteProducts.find(item => item.id === line.productId); return Boolean(product?.active && product.sizes.some(size => sizeKey(size) === sizeKey(line.size))) })) } }).catch(() => undefined)
     apiJson<{ email: string }>('/api/auth/me').then(async () => {
       if (!alive) return
@@ -245,12 +252,12 @@ export default function App() {
   }
 
   return <div className="app-shell">
-    <Header view={view} cartCount={cartCount} adminMode={adminMode} onNavigate={navigate} onLogout={logoutAdmin} />
+    <Header view={view} cartCount={cartCount} adminMode={adminMode} accountantEnabled={accountantEnabled === true} onNavigate={navigate} onLogout={logoutAdmin} />
     {view === 'shop' && <Shop products={activeProducts} categories={categories} onProduct={openProduct} onNavigate={navigate} />}
     {view === 'cart' && <Cart products={products} categories={categories} cart={cart} total={cartTotal} onUpdate={updateLine} onNavigate={navigate} onSubmit={submitOrder} />}
     {view === 'orders' && adminMode && <Orders orders={orders} products={products} onStatus={updateOrderStatus} />}
     {view === 'products' && adminMode && <ProductsAdminV2 products={products} categories={categories} onSave={saveProduct} onDelete={deleteProduct} onSaveCategory={saveCategory} onDeleteCategory={deleteCategory} />}
-    {view === 'accountant' && adminMode && <AccountantTest products={products} />}
+    {view === 'accountant' && adminMode && accountantEnabled && <AccountantTest products={products} />}
     {view === 'admin' && !adminMode && <AdminLocked onSignIn={() => { setAuthError(''); setShowLogin(true) }} />}
     {(view === 'orders' || view === 'products' || view === 'accountant') && !adminMode && <AdminRouteGuard onNavigate={navigate} />}
     {showLogin && view === 'admin' && <AdminLogin onClose={() => setShowLogin(false)} onLogin={loginAdmin} error={authError} />}
@@ -259,7 +266,7 @@ export default function App() {
   </div>
 }
 
-function Header({ view, cartCount, adminMode, onNavigate, onLogout }: { view: View; cartCount: number; adminMode: boolean; onNavigate: (view: View) => void; onLogout: () => void }) {
+function Header({ view, cartCount, adminMode, accountantEnabled, onNavigate, onLogout }: { view: View; cartCount: number; adminMode: boolean; accountantEnabled: boolean; onNavigate: (view: View) => void; onLogout: () => void }) {
   const [mobileOpen, setMobileOpen] = useState(false)
   const nav = (next: View) => { onNavigate(next); setMobileOpen(false) }
   return <header className="site-header">
@@ -269,7 +276,7 @@ function Header({ view, cartCount, adminMode, onNavigate, onLogout }: { view: Vi
       <nav className={mobileOpen ? 'main-nav open' : 'main-nav'}>
         <button className={view === 'shop' ? 'nav-link active' : 'nav-link'} onClick={() => nav('shop')}>Shop perfumes</button>
         <button className={view === 'cart' ? 'nav-link cart-nav active' : 'nav-link cart-nav'} onClick={() => nav('cart')} aria-label={`Your cart ${cartCount}`}>{icon('bag')}<span className="cart-count">{cartCount}</span></button>
-        {adminMode && <><span className="nav-divider" /><button className={view === 'orders' ? 'nav-link admin-link active' : 'nav-link admin-link'} onClick={() => nav('orders')}>Orders</button><button className={view === 'products' ? 'nav-link admin-link active' : 'nav-link admin-link'} onClick={() => nav('products')}>Products</button><button className={view === 'accountant' ? 'nav-link admin-link active' : 'nav-link admin-link'} onClick={() => nav('accountant')}>Accountant</button></>}
+        {adminMode && <><span className="nav-divider" /><button className={view === 'orders' ? 'nav-link admin-link active' : 'nav-link admin-link'} onClick={() => nav('orders')}>Orders</button><button className={view === 'products' ? 'nav-link admin-link active' : 'nav-link admin-link'} onClick={() => nav('products')}>Products</button>{accountantEnabled && <button className={view === 'accountant' ? 'nav-link admin-link active' : 'nav-link admin-link'} onClick={() => nav('accountant')}>Accountant</button>}</>}
         {adminMode && <button className="admin-toggle" onClick={onLogout}>Exit admin</button>}
       </nav>
     </div>
@@ -347,4 +354,3 @@ function AdminLocked({ onSignIn }: { onSignIn: () => void }) { return <main clas
 function AdminRouteGuard({ onNavigate }: { onNavigate: (view: View) => void }) { return <main className="admin-locked page-wrap"><div className="locked-mark">{icon('sparkle')}</div><p className="eyebrow">Private studio</p><h1>This area is <em>private.</em></h1><p>Admin sign in is available only from the private admin page.</p><button className="button button-dark" onClick={() => onNavigate('admin')}>Go to admin sign in {icon('arrow')}</button></main> }
 function AdminLogin({ onClose, onLogin, error }: { onClose: () => void; onLogin: (email: string, password: string) => Promise<void>; error: string }) { const [email, setEmail] = useState('admin@fragranceland.local'); const [password, setPassword] = useState('admin123'); const [busy, setBusy] = useState(false); async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setBusy(true); await onLogin(email, password); setBusy(false) } return <div className="modal-backdrop" role="presentation" onMouseDown={event => event.target === event.currentTarget && onClose()}><div className="login-card" role="dialog" aria-modal="true" aria-label="Admin sign in"><button className="modal-close" onClick={onClose} aria-label="Close admin sign in">{icon('close')}</button><p className="eyebrow">Fragrance Land / Private studio</p><h2>Welcome back.</h2><p className="login-copy">Sign in to manage your catalog and incoming orders.</p><form onSubmit={submit}><label>Email address<input required type="email" value={email} onChange={event => setEmail(event.target.value)} /></label><label>Password<input required type="password" value={password} onChange={event => setPassword(event.target.value)} /></label>{error && <p className="field-error">{error}</p>}<button className="button button-dark full-button" disabled={busy} type="submit">{busy ? 'Signing in…' : 'Sign in'} {icon('arrow')}</button><p className="login-hint">Local default: admin@fragranceland.local / admin123</p></form></div></div> }
 function Footer() { return <footer className="site-footer section-wrap"><img src={logo} alt="Fragrance Land" /><p>© 2026 Fragrance Land. Made for beautiful rituals.</p><span>Dubai · UAE</span></footer> }
-

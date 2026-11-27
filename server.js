@@ -22,6 +22,7 @@ const stripeSecretKey = process.env.STRIPE_SECRET_KEY || ''
 const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET || ''
 const openAiApiKey = String(process.env.OPENAI_API_KEY || '').trim()
 const openAiModel = String(process.env.OPENAI_MODEL || 'gpt-5-mini').trim()
+const accountantEnabled = !['false', '0', 'no', 'off'].includes(String(process.env.ACCOUNTANT_ENABLED ?? 'true').trim().toLowerCase())
 const isProduction = process.env.NODE_ENV === 'production'
 const stripe = stripeSecretKey ? new Stripe(stripeSecretKey) : null
 const supabaseUrl = String(process.env.SUPABASE_URL || '').trim().replace(/\/+$/, '')
@@ -479,7 +480,8 @@ const server = http.createServer(async (req, res) => {
   const requestUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
   const route = requestUrl.pathname
   try {
-    if (route === '/api/health') return json(res, 200, { ok: true, service: 'fragrance-land', time: new Date().toISOString() })
+    if (route === '/api/health') return json(res, 200, { ok: true, service: 'fragrance-land', accountantEnabled, time: new Date().toISOString() })
+    if (route === '/api/config' && req.method === 'GET') return json(res, 200, { accountantEnabled })
     if (route === '/api/auth/login' && req.method === 'POST') {
       if (!allowLoginAttempt(req)) return json(res, 429, { error: 'Too many login attempts. Try again later.' })
       const input = await body(req)
@@ -678,4 +680,3 @@ const server = http.createServer(async (req, res) => {
 })
 
 server.listen(port, '0.0.0.0', () => console.log(`Fragrance Land local server running at http://localhost:${port}`))
-
