@@ -2,7 +2,7 @@ import { type CSSProperties, type FormEvent, useEffect, useState } from 'react'
 import ProductsAdminV2 from './ProductsAdmin'
 import AccountantTest from './AccountantTest'
 
-type View = 'shop' | 'cart' | 'orders' | 'products' | 'accountant-test' | 'admin'
+type View = 'shop' | 'cart' | 'orders' | 'products' | 'accountant' | 'admin'
 type OrderStatus = 'Pending' | 'Processing' | 'Shipped' | 'Completed' | 'Cancelled'
 
 export type Category = {
@@ -42,6 +42,7 @@ type Order = {
   customer: { name: string; email: string; phone: string; address: string; country?: 'AE' | 'OTHER'; notes: string }
   lines: OrderLine[]
   shippingFee?: number
+  stripeFee?: number
   total: number
   status: OrderStatus
   paymentStatus?: string
@@ -80,7 +81,7 @@ function productPrice(product: Product) { return product.price * (1 - (product.d
 function shippingFeeForCountry(country: string) { return country === 'AE' ? 25 : 80 }
 function priceMarkup(product: Product, quantity = 1) { const sale = productPrice(product) * quantity; return product.discountPercent > 0 ? <><del>{money(product.price * quantity)}</del> <span className="sale-price">{money(sale)}</span></> : money(sale) }
 function categoryLabel(id: string, categories: Category[]) { const category = categories.find(item => item.id === id); return category ? `${category.nameEn} · ${category.nameAr}` : id }
-function getView(): View { const path = window.location.pathname; return path === '/admin' || path === '/admin/' ? 'admin' : path === '/accountant-test' || path === '/accountant-test/' ? 'accountant-test' : path.includes('cart') ? 'cart' : path.includes('orders') ? 'orders' : path.includes('products') ? 'products' : 'shop' }
+function getView(): View { const path = window.location.pathname; return path === '/admin' || path === '/admin/' ? 'admin' : path === '/admin/accountant' || path === '/admin/accountant/' || path === '/accountant-test' || path === '/accountant-test/' ? 'accountant' : path.includes('cart') ? 'cart' : path.includes('orders') ? 'orders' : path.includes('products') ? 'products' : 'shop' }
 export async function apiJson<T>(url: string, options: RequestInit = {}) {
   const response = await fetch(url, { credentials: 'include', ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } })
   const payload = await response.json().catch(() => ({}))
@@ -110,7 +111,7 @@ export default function App() {
   }, 0)
 
   function navigate(next: View) {
-    const path = next === 'shop' ? '/' : `/${next}`
+    const path = next === 'shop' ? '/' : next === 'accountant' ? '/admin/accountant' : `/${next}`
     window.history.pushState({}, '', path)
     setView(next)
     window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -249,9 +250,9 @@ export default function App() {
     {view === 'cart' && <Cart products={products} categories={categories} cart={cart} total={cartTotal} onUpdate={updateLine} onNavigate={navigate} onSubmit={submitOrder} />}
     {view === 'orders' && adminMode && <Orders orders={orders} products={products} onStatus={updateOrderStatus} />}
     {view === 'products' && adminMode && <ProductsAdminV2 products={products} categories={categories} onSave={saveProduct} onDelete={deleteProduct} onSaveCategory={saveCategory} onDeleteCategory={deleteCategory} />}
-    {view === 'accountant-test' && adminMode && <AccountantTest products={products} />}
+    {view === 'accountant' && adminMode && <AccountantTest products={products} />}
     {view === 'admin' && !adminMode && <AdminLocked onSignIn={() => { setAuthError(''); setShowLogin(true) }} />}
-    {(view === 'orders' || view === 'products' || view === 'accountant-test') && !adminMode && <AdminRouteGuard onNavigate={navigate} />}
+    {(view === 'orders' || view === 'products' || view === 'accountant') && !adminMode && <AdminRouteGuard onNavigate={navigate} />}
     {showLogin && view === 'admin' && <AdminLogin onClose={() => setShowLogin(false)} onLogin={loginAdmin} error={authError} />}
     {activeProduct && <ProductModal product={activeProduct} categories={categories} selectedSize={selectedSize} selectedQuantity={selectedQuantity} onSize={setSelectedSize} onQuantity={setSelectedQuantity} onClose={() => setActiveProduct(null)} onAdd={() => addToCart(activeProduct.id, selectedSize, selectedQuantity)} />}
     {notice && <div className="toast"><span className="toast-icon">{icon('check')}</span>{notice}</div>}
@@ -268,7 +269,7 @@ function Header({ view, cartCount, adminMode, onNavigate, onLogout }: { view: Vi
       <nav className={mobileOpen ? 'main-nav open' : 'main-nav'}>
         <button className={view === 'shop' ? 'nav-link active' : 'nav-link'} onClick={() => nav('shop')}>Shop perfumes</button>
         <button className={view === 'cart' ? 'nav-link cart-nav active' : 'nav-link cart-nav'} onClick={() => nav('cart')} aria-label={`Your cart ${cartCount}`}>{icon('bag')}<span className="cart-count">{cartCount}</span></button>
-        {adminMode && <><span className="nav-divider" /><button className={view === 'orders' ? 'nav-link admin-link active' : 'nav-link admin-link'} onClick={() => nav('orders')}>Orders</button><button className={view === 'products' ? 'nav-link admin-link active' : 'nav-link admin-link'} onClick={() => nav('products')}>Products</button><button className={view === 'accountant-test' ? 'nav-link admin-link active' : 'nav-link admin-link'} onClick={() => nav('accountant-test')}>Accountant</button></>}
+        {adminMode && <><span className="nav-divider" /><button className={view === 'orders' ? 'nav-link admin-link active' : 'nav-link admin-link'} onClick={() => nav('orders')}>Orders</button><button className={view === 'products' ? 'nav-link admin-link active' : 'nav-link admin-link'} onClick={() => nav('products')}>Products</button><button className={view === 'accountant' ? 'nav-link admin-link active' : 'nav-link admin-link'} onClick={() => nav('accountant')}>Accountant</button></>}
         {adminMode && <button className="admin-toggle" onClick={onLogout}>Exit admin</button>}
       </nav>
     </div>
@@ -336,7 +337,7 @@ function OrderDetails({ order, products, onClose }: { order: Order; products: Pr
     <div className="order-details-heading"><div><p className="eyebrow">Order details</p><h2>{order.id}</h2><p>{order.date}</p></div><div className="order-details-actions"><span className="payment-badge">{order.paymentStatus || 'Paid via Stripe'}</span><button className="icon-button" onClick={onClose} aria-label="Close order details">{icon('close')}</button></div></div>
     <div className="order-details-grid">
       <div className="order-customer-card"><p className="label">Customer</p><h3>{order.customer.name}</h3><dl><div><dt>Email</dt><dd>{order.customer.email || 'Not provided'}</dd></div><div><dt>Phone</dt><dd>{order.customer.phone}</dd></div><div><dt>Country</dt><dd>{order.customer.country === 'AE' ? 'United Arab Emirates' : order.customer.country === 'OTHER' ? 'Outside UAE' : 'Not provided'}</dd></div><div><dt>Address</dt><dd>{order.customer.address || 'Not provided'}</dd></div>{order.customer.notes && <div><dt>Notes</dt><dd>{order.customer.notes}</dd></div>}</dl></div>
-      <div className="order-items-card"><div className="order-items-heading"><p className="label">Items</p><span>{order.lines.reduce((sum, line) => sum + line.quantity, 0)} items</span></div>{order.lines.map((line, index) => { const product = products.find(item => item.id === line.productId); const unitPrice = line.price ?? (product ? productPrice(product) : 0); return <div className="order-item" key={`${line.productId}-${sizeKey(line.size)}-${index}`}><img src={product?.images[0]} alt={product?.name || 'Product'} /><div><strong>{product?.name || 'Product unavailable'}</strong><p>{sizeLabel(line.size)} · Qty {line.quantity}</p></div><span>{money(unitPrice * line.quantity)}</span></div> })}{typeof order.shippingFee === 'number' && <div className="order-total"><span>Shipping</span><strong>{money(order.shippingFee)}</strong></div>}<div className="order-total"><span>Total paid</span><strong>{money(order.total)}</strong></div></div>
+      <div className="order-items-card"><div className="order-items-heading"><p className="label">Items</p><span>{order.lines.reduce((sum, line) => sum + line.quantity, 0)} items</span></div>{order.lines.map((line, index) => { const product = products.find(item => item.id === line.productId); const unitPrice = line.price ?? (product ? productPrice(product) : 0); return <div className="order-item" key={`${line.productId}-${sizeKey(line.size)}-${index}`}><img src={product?.images[0]} alt={product?.name || 'Product'} /><div><strong>{product?.name || 'Product unavailable'}</strong><p>{sizeLabel(line.size)} · Qty {line.quantity}</p></div><span>{money(unitPrice * line.quantity)}</span></div> })}{typeof order.shippingFee === 'number' && <div className="order-total"><span>Shipping</span><strong>{money(order.shippingFee)}</strong></div>}{typeof order.stripeFee === 'number' && order.stripeFee > 0 && <div className="order-total"><span>Stripe fee</span><strong>{money(order.stripeFee)}</strong></div>}<div className="order-total"><span>Total paid</span><strong>{money(order.total)}</strong></div></div>
     </div>
   </section>
 }
