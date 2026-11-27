@@ -127,7 +127,12 @@ export function createAccountantService({ supabase, getStore, writeStore, getPro
   }
 
   async function expenses() { return remote ? list('accountant_expenses', 'transaction_date') : localState(getStore()).expenses }
-  async function materials() { return remote ? list('accountant_materials', 'purchase_date') : localState(getStore()).materials }
+  async function materials() {
+    if (!remote) return localState(getStore()).materials.filter(item => !item.archived)
+    const { data, error } = await supabase.from('accountant_materials').select('*').eq('archived', false).order('purchase_date', { ascending: false })
+    if (error) throw new Error(`accountant_materials read failed: ${error.message}`)
+    return data || []
+  }
   async function outsideSales() {
     if (!remote) return localState(getStore()).outsideSales
     const rows = await list('accountant_outside_sales', 'sale_date')
@@ -223,11 +228,31 @@ export function createAccountantService({ supabase, getStore, writeStore, getPro
   }
 
   async function deleteMaterial(id) {
-    const current = remote ? await one('accountant_materials', id) : localState(getStore()).materials.find(item => item.id === id)
+    const current = remote ? await one('accountant_materials', id) : localState(getStore()).materials.find(item => item.id === id && !item.archived)
     if (!current) throw new Error('Raw material not found.')
-    if (remote) { const { error } = await supabase.from('accountant_materials').delete().eq('id', id); if (error) throw new Error(`Material delete failed: ${error.message}`) }
-    else { const state = localState(getStore()); state.materials = state.materials.filter(item => item.id !== id) }
-    await audit('delete', 'material', id)
+    if (remote) {
+      const [{ data: batchLines, error: batchError }, { data: movements, error: movementError }] = await Promise.all([
+        supabase.from('accountant_production_batch_materials').select('batch_id').eq('material_id', id).limit(1),
+        supabase.from('accountant_inventory_movements').select('id').eq('material_id', id).limit(1),
+      ])
+      if (batchError) throw new Error(`Material history check failed: ${batchError.message}`)
+      if (movementError) throw new Error(`Material history check failed: ${movementError.message}`)
+      const hasHistory = Boolean(batchLines?.length || movements?.length)
+      if (hasHistory) {
+        const { error } = await supabase.from('accountant_materials').update({ archived: true, quantity: 0, updated_at: new Date().toISOString() }).eq('id', id)
+        if (error) throw new Error(`Material archive failed: ${error.message}`)
+        await audit('archive', 'material', id, { reason: 'Referenced by accounting history' })
+      } else {
+        const { error } = await supabase.from('accountant_materials').delete().eq('id', id)
+        if (error) throw new Error(`Material delete failed: ${error.message}`)
+        await audit('delete', 'material', id)
+      }
+    } else {
+      const state = localState(getStore())
+      const hasHistory = state.batchMaterials.some(item => item.material_id === id) || state.movements.some(item => item.material_id === id)
+      if (hasHistory) { current.archived = true; current.quantity = 0; await audit('archive', 'material', id, { reason: 'Referenced by accounting history' }) }
+      else { state.materials = state.materials.filter(item => item.id !== id); await audit('delete', 'material', id) }
+    }
     await writeStore(getStore())
   }
 
