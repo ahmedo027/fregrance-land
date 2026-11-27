@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import { estimateStripeFee, roundAed } from './src/pricing.js'
 
 export const EXPENSE_CATEGORIES = ['Raw Materials', 'Packaging', 'Shipping', 'Marketing', 'Advertising', 'Rent', 'Salaries', 'Subscriptions', 'Other Expenses']
 export const MATERIAL_CATEGORIES = ['Perfume oils', 'Oud oils', 'Alcohol', 'Musk', 'Bakhoor ingredients', 'Packaging materials', 'Bottles', 'Boxes', 'Other']
@@ -46,10 +47,11 @@ function inRange(date, from, to) {
   return true
 }
 
+const dubaiDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dubai', year: 'numeric', month: '2-digit', day: '2-digit' })
+
 function dateForOrder(order) {
-  if (order.createdAt) return String(order.createdAt).slice(0, 10)
-  const parsed = new Date(order.date)
-  return Number.isNaN(parsed.getTime()) ? today() : parsed.toISOString().slice(0, 10)
+  const parsed = new Date(order.paidAt || order.createdAt || order.date)
+  return Number.isNaN(parsed.getTime()) ? today() : dubaiDate.format(parsed)
 }
 
 function localState(store) {
@@ -141,7 +143,7 @@ export function createAccountantService({ supabase, getStore, writeStore, getPro
     for (const legacySale of legacy) {
       try {
         const normalized = normalizeSale({ id: legacySale.id, productId: legacySale.productId, size: legacySale.size, quantity: legacySale.quantity, unitPrice: legacySale.unitPrice, saleDate: legacySale.date, notes: legacySale.notes, confirmed: true })
-        await insert('accountant_outside_sales', { id: /^[0-9a-f-]{36}$/i.test(normalized.id) ? normalized.id : newId(), product_id: normalized.product_id, size_value: normalized.size_value, size_unit: normalized.size_unit, quantity: normalized.quantity, unit_price: normalized.unit_price, discount_percent: normalized.discount_percent, payment_method: 'Other', sale_date: normalized.sale_date, notes: normalized.notes, status: 'Confirmed' })
+        await insert('accountant_outside_sales', { id: /^[0-9a-f-]{36}$/i.test(normalized.id) ? normalized.id : newId(), product_id: normalized.product_id, size_value: normalized.size_value, size_unit: normalized.size_unit, quantity: normalized.quantity, unit_price: normalized.unit_price, discount_percent: normalized.discount_percent, payment_method: 'Other', customer_region: 'AE', stripe_fee: 0, sale_date: normalized.sale_date, notes: normalized.notes, status: 'Confirmed' })
       } catch (error) { console.warn('Legacy outside sale migration skipped:', error?.message || error) }
     }
     return list('accountant_outside_sales', 'sale_date')
@@ -263,10 +265,14 @@ export function createAccountantService({ supabase, getStore, writeStore, getPro
     if (!product) throw new Error('Choose a valid product for the outside sale.')
     const size = normalizeSize(input?.size ?? { value: existing.size_value, unit: existing.size_unit })
     if (!product.sizes.some(option => Number(option.value) === size.value && option.unit === size.unit)) throw new Error('Choose a valid product size.')
-    const sale = { id: existing.id || newId(), product_id: product.id, size_value: size.value, size_unit: size.unit, quantity: Number(input?.quantity ?? existing.quantity), unit_price: money(input?.unitPrice ?? existing.unit_price), discount_percent: Math.min(100, Math.max(0, Number(input?.discountPercent ?? existing.discount_percent ?? 0))), payment_method: PAYMENT_METHODS.includes(input?.paymentMethod ?? existing.payment_method) ? (input?.paymentMethod ?? existing.payment_method) : 'Other', sale_date: validDate(input?.saleDate ?? existing.sale_date) ? (input?.saleDate ?? existing.sale_date) : today(), notes: text(input?.notes ?? existing.notes, 500), status: input?.status || existing.status || 'Confirmed' }
+    const paymentMethod = PAYMENT_METHODS.includes(input?.paymentMethod ?? existing.payment_method) ? (input?.paymentMethod ?? existing.payment_method) : 'Other'
+    const customerRegion = (input?.customerRegion ?? existing.customer_region) === 'OTHER' ? 'OTHER' : 'AE'
+    const sale = { id: existing.id || newId(), product_id: product.id, size_value: size.value, size_unit: size.unit, quantity: Number(input?.quantity ?? existing.quantity), unit_price: money(input?.unitPrice ?? existing.unit_price), discount_percent: money(Math.min(100, Number(input?.discountPercent ?? existing.discount_percent ?? 0))), payment_method: paymentMethod, customer_region: customerRegion, shipping_fee: money(input?.shippingFee ?? existing.shipping_fee), sale_date: validDate(input?.saleDate ?? existing.sale_date) ? (input?.saleDate ?? existing.sale_date) : today(), notes: text(input?.notes ?? existing.notes, 500), status: input?.status || existing.status || 'Confirmed' }
     if (!Number.isInteger(sale.quantity) || sale.quantity < 1) throw new Error('Sale quantity must be a whole number from 1 upward.')
     if (sale.unit_price < 0) throw new Error('Sale price cannot be negative.')
-    return { ...sale, total: money(sale.quantity * sale.unit_price * (1 - sale.discount_percent / 100)), productName: product.name, size }
+    const total = money(sale.quantity * sale.unit_price * (1 - sale.discount_percent / 100))
+    sale.stripe_fee = paymentMethod === 'Card' ? estimateStripeFee(total + sale.shipping_fee, { internationalCard: customerRegion === 'OTHER' }) : 0
+    return { ...sale, total, productName: product.name, size }
   }
 
   async function createOutsideSale(input) {
@@ -276,12 +282,19 @@ export function createAccountantService({ supabase, getStore, writeStore, getPro
       if (Number(product.stock) < sale.quantity) throw new Error('Not enough finished-product stock for this sale.')
       product.stock -= sale.quantity
     }
-    const payload = { id: sale.id, product_id: sale.product_id, size_value: sale.size_value, size_unit: sale.size_unit, quantity: sale.quantity, unit_price: sale.unit_price, discount_percent: sale.discount_percent, payment_method: sale.payment_method, sale_date: sale.sale_date, notes: sale.notes, status: sale.status }
-    const saved = remote ? await insert('accountant_outside_sales', payload) : (() => { const value = { ...payload, total: sale.total, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }; localState(getStore()).outsideSales.unshift(value); return value })()
+    const { total, productName, size, ...payload } = sale
+    let saved
+    try {
+      saved = remote ? await insert('accountant_outside_sales', payload) : { ...payload, total, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }
+    } catch (error) {
+      if (sale.status === 'Confirmed') productById(sale.product_id).stock += sale.quantity
+      throw error
+    }
+    if (!remote) localState(getStore()).outsideSales.unshift(saved)
     if (sale.status === 'Confirmed') await recordMovement({ idempotencyKey: `outside-sale:${sale.id}`, movementType: 'outside_sale', referenceId: sale.id, inventoryKey: `product:${sale.product_id}`, productId: sale.product_id, sizeValue: sale.size_value, sizeUnit: sale.size_unit, quantityDelta: -sale.quantity, unit: 'pieces', unitCost: 0 })
     await audit('create', 'outside_sale', sale.id, payload)
     await writeStore(getStore())
-    return { ...saved, total: sale.total, productName: product.name, size: { value: sale.size_value, unit: sale.size_unit } }
+    return { ...saved, total, productName, size }
   }
 
   async function updateOutsideSale(id, input) {
@@ -289,7 +302,7 @@ export function createAccountantService({ supabase, getStore, writeStore, getPro
     if (!current) throw new Error('Outside sale not found.')
     const next = normalizeSale(input, current)
     if (current.status === 'Confirmed' && next.status !== 'Cancelled') throw new Error('Confirmed sales cannot be edited. Cancel it and create a corrected sale.')
-    const saved = remote ? await update('accountant_outside_sales', id, { notes: next.notes, status: next.status }) : Object.assign(current, { notes: next.notes, status: next.status })
+    const saved = remote ? await update('accountant_outside_sales', id, { notes: next.notes, status: next.status, customer_region: next.customer_region, payment_method: next.payment_method, stripe_fee: next.stripe_fee }) : Object.assign(current, { notes: next.notes, status: next.status, customer_region: next.customer_region, payment_method: next.payment_method, stripe_fee: next.stripe_fee })
     await audit('update', 'outside_sale', id, { status: next.status })
     await writeStore(getStore())
     return saved
@@ -374,36 +387,114 @@ export function createAccountantService({ supabase, getStore, writeStore, getPro
     const store = getStore()
     const [expenseRows, materialRows, salesRows, batchRows] = await Promise.all([expenses(), materials(), outsideSales(), batches()])
     const products = getProducts()
-    const productRows = products.map(product => ({ id: product.id, name: product.name, image: product.images?.[0] || '', productionCost: money(product.productionCost), packagingCost: money(product.packagingCost), unitCost: money(Number(product.productionCost || 0) + Number(product.packagingCost || 0)), websiteUnits: 0, outsideUnits: 0, websiteRevenue: 0, outsideRevenue: 0 }))
+    const productRows = products.map(product => ({ id: product.id, name: product.name, image: product.images?.[0] || '', productionCost: money(product.productionCost), packagingCost: money(product.packagingCost), unitCost: money(Number(product.productionCost || 0) + Number(product.packagingCost || 0)), websiteUnits: 0, outsideUnits: 0, websiteRevenue: 0, outsideRevenue: 0, estimatedCost: 0, allocatedFees: 0 }))
     const byId = new Map(productRows.map(product => [product.id, product]))
-    let websiteRevenue = 0; let shippingRevenue = 0; let websiteUnits = 0; let websiteOrderCount = 0; let stripeFees = 0
+    const emptyRegion = () => ({ productRevenue: 0, shippingRevenue: 0, stripeFees: 0, cashRevenue: 0 })
+    const regions = { AE: emptyRegion(), OTHER: emptyRegion(), UNKNOWN: emptyRegion() }
+    function recordRegion(region, revenue, shipping, fee, cash) {
+      const row = regions[region]
+      row.productRevenue = roundAed(row.productRevenue + revenue)
+      row.shippingRevenue = roundAed(row.shippingRevenue + shipping)
+      row.stripeFees = roundAed(row.stripeFees + fee)
+      if (cash) row.cashRevenue = roundAed(row.cashRevenue + revenue + shipping)
+    }
+    let websiteRevenue = 0
+    let websiteShipping = 0
+    let websiteUnits = 0
+    let websiteOrderCount = 0
+    let cogs = 0
+    let actualStripeFees = 0
+    let estimatedStripeFees = 0
     for (const order of store.orders || []) {
       const date = dateForOrder(order)
       if (!inRange(date, from, to) || order.status === 'Cancelled' || (order.paymentStatus && order.paymentStatus !== 'Paid')) continue
-      websiteOrderCount += 1; shippingRevenue += money(order.shippingFee); stripeFees += money(order.stripeFee)
-      for (const line of order.lines || []) {
-        const product = byId.get(line.productId); const units = Number(line.quantity || 0); const revenue = money(Number(line.price || 0) * units)
-        if (product) { product.websiteUnits += units; product.websiteRevenue += revenue }
-        websiteUnits += units; websiteRevenue += revenue
+      const shipping = money(order.shippingFee)
+      const lines = order.lines || []
+      const lineRevenue = lines.map(line => money(Number(line.price || 0) * Number(line.quantity || 0)))
+      const revenue = lines.length && lines.every(line => line.price != null)
+        ? roundAed(lineRevenue.reduce((sum, amount) => sum + amount, 0))
+        : money(Number(order.total) - shipping)
+      const cash = order.paymentMethod === 'Cash'
+      const actual = !cash && (order.stripeFeeSource === 'actual' || Number(order.stripeFee) > 0)
+      const internationalCard = order.cardCountry ? order.cardCountry !== 'AE' : order.customer?.country === 'OTHER'
+      const fee = cash ? 0 : actual ? money(order.stripeFee) : estimateStripeFee(revenue + shipping, { internationalCard })
+      if (actual) actualStripeFees += fee
+      else estimatedStripeFees += fee
+      const region = order.customer?.country
+      recordRegion(region === 'AE' || region === 'OTHER' ? region : 'UNKNOWN', revenue, shipping, fee, cash)
+      websiteOrderCount += 1
+      websiteShipping += shipping
+      websiteRevenue += revenue
+      for (const [index, line] of lines.entries()) {
+        const product = byId.get(line.productId)
+        const units = Number(line.quantity || 0)
+        const cost = money(Number(line.unitCost ?? product?.unitCost ?? 0) * units)
+        cogs += cost
+        if (product) {
+          product.websiteUnits += units
+          product.websiteRevenue += lineRevenue[index]
+          product.estimatedCost += cost
+          product.allocatedFees += revenue + shipping > 0 ? fee * lineRevenue[index] / (revenue + shipping) : 0
+        }
+        websiteUnits += units
       }
     }
-    const outsideSalesFiltered = salesRows.filter(sale => sale.status !== 'Cancelled' && inRange(String(sale.sale_date), from, to)).map(sale => { const product = byId.get(sale.product_id); const total = money(Number(sale.quantity || 0) * Number(sale.unit_price || 0) * (1 - Number(sale.discount_percent || 0) / 100)); if (product) { product.outsideUnits += Number(sale.quantity || 0); product.outsideRevenue += total }; return { ...sale, productName: product?.name || 'Deleted product', total, size: { value: sale.size_value, unit: sale.size_unit } } })
+    const outsideSalesFiltered = salesRows.filter(sale => sale.status === 'Confirmed' && inRange(String(sale.sale_date), from, to)).map(sale => {
+      const product = byId.get(sale.product_id)
+      const total = money(Number(sale.quantity || 0) * Number(sale.unit_price || 0) * (1 - Number(sale.discount_percent || 0) / 100))
+      const customerRegion = sale.customer_region === 'OTHER' ? 'OTHER' : 'AE'
+      const shipping = money(sale.shipping_fee)
+      const stripeFee = sale.payment_method === 'Card' ? money(sale.stripe_fee) || estimateStripeFee(total + shipping, { internationalCard: customerRegion === 'OTHER' }) : 0
+      const cost = money(Number(sale.quantity) * (product?.unitCost ?? 0))
+      cogs += cost
+      estimatedStripeFees += stripeFee
+      recordRegion(customerRegion, total, shipping, stripeFee, sale.payment_method === 'Cash')
+      if (product) {
+        product.outsideUnits += Number(sale.quantity || 0)
+        product.outsideRevenue += total
+        product.estimatedCost += cost
+        product.allocatedFees += total + shipping > 0 ? stripeFee * total / (total + shipping) : 0
+      }
+      return { ...sale, customer_region: customerRegion, shipping_fee: shipping, stripe_fee: stripeFee, productName: product?.name || 'Deleted product', total, size: { value: sale.size_value, unit: sale.size_unit } }
+    })
     const outsideRevenue = money(outsideSalesFiltered.reduce((sum, sale) => sum + sale.total, 0))
+    const outsideShipping = money(outsideSalesFiltered.reduce((sum, sale) => sum + sale.shipping_fee, 0))
+    const shippingRevenue = roundAed(websiteShipping + outsideShipping)
+    const stripeFees = roundAed(actualStripeFees + estimatedStripeFees)
     const totalUnits = websiteUnits + outsideSalesFiltered.reduce((sum, sale) => sum + Number(sale.quantity || 0), 0)
-    const productRowsFinal = productRows.map(product => { const units = product.websiteUnits + product.outsideUnits; const revenue = money(product.websiteRevenue + product.outsideRevenue); const cogs = money(units * product.unitCost); return { ...product, totalUnits: units, totalRevenue: revenue, estimatedCost: cogs, estimatedProfit: money(revenue - cogs) } })
+    const productRowsFinal = productRows.map(product => {
+      const totalRevenue = roundAed(product.websiteRevenue + product.outsideRevenue)
+      return { ...product, totalUnits: product.websiteUnits + product.outsideUnits, totalRevenue, estimatedProfit: roundAed(totalRevenue - product.estimatedCost - product.allocatedFees) }
+    })
     const expensesFiltered = expenseRows.filter(expense => inRange(String(expense.transaction_date), from, to))
     const totalExpenses = money(expensesFiltered.reduce((sum, expense) => sum + Number(expense.amount || 0), 0))
-    const totalRevenue = money(websiteRevenue + shippingRevenue + outsideRevenue)
-    const cogs = money(productRowsFinal.reduce((sum, product) => sum + product.estimatedCost, 0))
-    const grossProfit = money(totalRevenue - cogs)
-    const netProfit = money(grossProfit - totalExpenses)
+    const productRevenue = money(websiteRevenue + outsideRevenue)
+    const totalRevenue = money(productRevenue + shippingRevenue)
+    cogs = roundAed(cogs)
+    const grossProfit = roundAed(totalRevenue - cogs)
+    const netProfit = roundAed(grossProfit - stripeFees - totalExpenses)
     const inventory = await getInventory()
     const inventoryValue = money(inventory.reduce((sum, item) => sum + item.value, 0))
     const fixedExpenseCategories = new Set(['Rent', 'Salaries', 'Subscriptions', 'Marketing', 'Advertising', 'Other Expenses'])
     const fixedExpenses = money(expensesFiltered.filter(expense => fixedExpenseCategories.has(expense.category)).reduce((sum, expense) => sum + Number(expense.amount || 0), 0))
-    const contributionMargin = totalUnits ? (totalRevenue - cogs) / totalUnits : 0
+    const contributionMargin = totalUnits ? (productRevenue - cogs - stripeFees) / totalUnits : 0
     const breakEvenUnits = contributionMargin > 0 ? Math.ceil(fixedExpenses / contributionMargin) : 0
-    return { currency: 'AED', dateRange: { from: from || null, to: to || null }, generatedAt: new Date().toISOString(), dashboard: { totalRevenue, grossProfit, netProfit, totalExpenses, costOfGoodsSold: cogs, totalProductsSold: totalUnits, outsideSales: outsideRevenue, websiteSales: money(websiteRevenue + shippingRevenue), inventoryValue, stripeFees, breakEvenProgress: breakEvenUnits ? Math.min(100, Math.round((totalUnits / breakEvenUnits) * 100)) : 0 }, breakEven: { fixedExpenses, contributionMargin: money(contributionMargin), unitsNeeded: breakEvenUnits, unitsSold: totalUnits }, website: { orderCount: websiteOrderCount, units: websiteUnits, productRevenue: websiteRevenue, shippingRevenue, collectedRevenue: money(websiteRevenue + shippingRevenue) }, external: { saleCount: outsideSalesFiltered.length, units: outsideSalesFiltered.reduce((sum, sale) => sum + Number(sale.quantity || 0), 0), productRevenue: outsideRevenue }, products: productRowsFinal, expenses: expensesFiltered, materials: materialRows, outsideSales: outsideSalesFiltered, batches: batchRows.filter(batch => inRange(String(batch.batch_date), from, to)), inventory }
+    return {
+      currency: 'AED',
+      dateRange: { from: from || null, to: to || null },
+      generatedAt: new Date().toISOString(),
+      dashboard: { totalRevenue, productRevenue, shippingRevenue, grossProfit, netProfit, totalExpenses, costOfGoodsSold: cogs, totalProductsSold: totalUnits, outsideSales: outsideRevenue, websiteSales: roundAed(websiteRevenue), inventoryValue, stripeFees, actualStripeFees: roundAed(actualStripeFees), estimatedStripeFees: roundAed(estimatedStripeFees), breakEvenProgress: breakEvenUnits ? Math.min(100, Math.round((totalUnits / breakEvenUnits) * 100)) : 0 },
+      breakEven: { fixedExpenses, contributionMargin: roundAed(contributionMargin), unitsNeeded: breakEvenUnits, unitsSold: totalUnits },
+      website: { orderCount: websiteOrderCount, units: websiteUnits, productRevenue: roundAed(websiteRevenue), shippingRevenue: roundAed(websiteShipping), collectedRevenue: roundAed(websiteRevenue + websiteShipping) },
+      external: { saleCount: outsideSalesFiltered.length, units: totalUnits - websiteUnits, productRevenue: outsideRevenue, shippingRevenue: outsideShipping },
+      regions,
+      products: productRowsFinal,
+      expenses: expensesFiltered,
+      materials: materialRows,
+      outsideSales: outsideSalesFiltered,
+      batches: batchRows.filter(batch => inRange(String(batch.batch_date), from, to)),
+      inventory,
+    }
   }
 
   return { summary, expenses, createExpense, updateExpense, deleteExpense, materials, createMaterial, updateMaterial, deleteMaterial, outsideSales, createOutsideSale, updateOutsideSale, deleteOutsideSale, batches, batchMaterials, createProductionBatch, getInventory, recordMovement, audit }

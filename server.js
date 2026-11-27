@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import Stripe from 'stripe'
 import { createClient } from '@supabase/supabase-js'
 import { createAccountantService } from './accountant-service.js'
+import { roundAed, shippingFeeForCountry } from './src/pricing.js'
 
 const root = path.dirname(fileURLToPath(import.meta.url))
 const publicDir = path.join(root, 'public')
@@ -79,7 +80,6 @@ function sizeLabel(size) { const normalized = normalizeSizeOption(size); return 
 function normalizeDiscount(value) { const discount = Number(value || 0); return Number.isFinite(discount) ? Math.min(99, Math.max(0, Math.round(discount))) : 0 }
 function normalizeMoney(value) { const amount = Number(value || 0); return Number.isFinite(amount) && amount >= 0 ? Number(amount.toFixed(2)) : 0 }
 function productPrice(product) { return Number((Number(product.price) * (1 - normalizeDiscount(product.discountPercent) / 100)).toFixed(2)) }
-function shippingFeeForCountry(country) { return country === 'AE' ? 25 : 80 }
 function productUnitCost(product) { return normalizeMoney(product.productionCost) + normalizeMoney(product.packagingCost) }
 
 function normalizeExternalSale(input, store) {
@@ -344,6 +344,7 @@ function normalizeCustomer(input) {
     phone: String(input?.phone || '').trim().slice(0, 40),
     address: String(input?.address || '').trim().slice(0, 240),
     country: String(input?.country || '').trim(),
+    countryName: String(input?.countryName || '').trim().slice(0, 100),
     notes: String(input?.notes || '').trim().slice(0, 1000),
   }
   if (!customer.name || !customer.phone || !customer.address || !['AE', 'OTHER'].includes(customer.country) || (customer.email && !/^\S+@\S+\.\S+$/.test(customer.email))) throw new Error('Complete valid customer details before checkout.')
@@ -351,6 +352,7 @@ function normalizeCustomer(input) {
 }
 function orderLinesForStore(store, inputLines) {
   if (!Array.isArray(inputLines) || !inputLines.length || inputLines.length > 50) throw new Error('Add at least one product to the cart.')
+  const requested = new Map()
   return inputLines.map(line => {
     const product = store.products.find(item => item.id === line.productId && item.active)
     if (!product) throw new Error('One of the selected products is unavailable.')
@@ -358,8 +360,10 @@ function orderLinesForStore(store, inputLines) {
     const size = normalizeSizeOption(line.size || product.sizes[0])
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) throw new Error('Product quantity is invalid.')
     if (!product.sizes.some(option => sizeKey(option) === sizeKey(size))) throw new Error('Product size is invalid.')
-    if (quantity > product.stock) throw new Error(`${product.name} does not have enough stock.`)
-    return { productId: product.id, size, quantity, price: productPrice(product) }
+    const totalRequested = (requested.get(product.id) || 0) + quantity
+    if (totalRequested > product.stock) throw new Error(`${product.name} does not have enough stock.`)
+    requested.set(product.id, totalRequested)
+    return { productId: product.id, size, quantity, price: productPrice(product), unitCost: productUnitCost(product) }
   })
 }
 function body(req) {
@@ -434,14 +438,30 @@ async function recordWebsiteOrderMovements(order) {
   }
 }
 
-async function createPaidOrder(store, draft, sessionId, stripeFee = 0) {
+function newOrder(draft, paymentMethod, paymentStatus) {
+  const now = new Date()
+  return {
+    id: `FL-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
+    date: now.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Dubai' }),
+    createdAt: now.toISOString(),
+    customer: draft.customer,
+    lines: draft.lines,
+    shippingFee: draft.shippingFee,
+    total: draft.total,
+    status: 'Pending',
+    paymentMethod,
+    paymentStatus,
+  }
+}
+
+async function createPaidOrder(store, draft, sessionId, paymentDetails) {
   const existing = store.orders.find(order => order.paymentSessionId === sessionId)
   if (existing) { await recordWebsiteOrderMovements(existing); return null }
   for (const line of draft.lines) {
     const product = store.products.find(item => item.id === line.productId)
     if (product) product.stock = Math.max(0, product.stock - line.quantity)
   }
-  const order = { id: `FL-${Date.now().toString().slice(-8)}`, date: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }), createdAt: new Date().toISOString(), customer: draft.customer, lines: draft.lines, shippingFee: draft.shippingFee, stripeFee: normalizeMoney(stripeFee), total: draft.total, status: 'Pending', paymentStatus: 'Paid', paymentSessionId: sessionId }
+  const order = { ...newOrder(draft, 'Card', 'Paid'), ...paymentDetails, paymentSessionId: sessionId }
   store.orders.unshift(order)
   store.pendingCheckouts = store.pendingCheckouts.filter(item => item.id !== draft.id)
   await writeStore(store)
@@ -456,16 +476,22 @@ async function completeStripeSession(session) {
     console.warn('Stripe payment received without a matching checkout draft:', session.id)
     return null
   }
-  let stripeFee = 0
+  const paymentDetails = {}
   try {
     const paymentIntentId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id
     if (stripe && paymentIntentId) {
       const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId, { expand: ['latest_charge.balance_transaction'] })
-      const transaction = paymentIntent.latest_charge?.balance_transaction
-      stripeFee = typeof transaction === 'object' ? Number(transaction.fee || 0) / 100 : 0
+      const charge = paymentIntent.latest_charge
+      const transaction = charge?.balance_transaction
+      const cardCountry = charge?.payment_method_details?.card?.country
+      if (cardCountry) paymentDetails.cardCountry = cardCountry
+      if (transaction?.currency === 'aed' && Number.isFinite(transaction.fee)) {
+        paymentDetails.stripeFee = transaction.fee / 100
+        paymentDetails.stripeFeeSource = 'actual'
+      }
     }
   } catch (error) { console.warn('Stripe fee lookup unavailable:', error?.message || error) }
-  return createPaidOrder(store, draft, session.id, stripeFee)
+  return createPaidOrder(store, draft, session.id, paymentDetails)
 }
 function serveFile(req, res, filePath) {
   if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) { res.writeHead(404); res.end('Not found'); return }
@@ -482,6 +508,9 @@ const server = http.createServer(async (req, res) => {
   try {
     if (route === '/api/health') return json(res, 200, { ok: true, service: 'fragrance-land', accountantEnabled, time: new Date().toISOString() })
     if (route === '/api/config' && req.method === 'GET') return json(res, 200, { accountantEnabled })
+    if (!accountantEnabled && (route === '/api/accountant' || route.startsWith('/api/accountant/'))) {
+      return json(res, 404, { error: 'Not found.' })
+    }
     if (route === '/api/auth/login' && req.method === 'POST') {
       if (!allowLoginAttempt(req)) return json(res, 429, { error: 'Too many login attempts. Try again later.' })
       const input = await body(req)
@@ -632,13 +661,29 @@ const server = http.createServer(async (req, res) => {
     if (productMatch && req.method === 'PUT') { if (!requireAdmin(req, res)) return; const productId = decodeURIComponent(productMatch[1]); const index = store.products.findIndex(product => product.id === productId); if (index < 0) return json(res, 404, { error: 'Product not found.' }); const input = await body(req); const product = await normalizeProduct(input, store.products[index], store.categories); store.products[index] = product; await writeStore(store); return json(res, 200, product) }
     if (productMatch && req.method === 'DELETE') { if (!requireAdmin(req, res)) return; const productId = decodeURIComponent(productMatch[1]); store.products = store.products.filter(product => product.id !== productId); await writeStore(store); return noContent(res) }
     if (route === '/api/checkout/session' && req.method === 'POST') {
-      if (!stripe) return json(res, 503, { error: 'Stripe payments are not configured yet.' })
       const input = await body(req)
       const customer = normalizeCustomer(input.customer)
+      const paymentMethod = input.paymentMethod ?? 'Card'
+      if (!['Card', 'Cash'].includes(paymentMethod) || (paymentMethod === 'Cash' && customer.country !== 'OTHER')) {
+        return json(res, 400, { error: 'Choose an available payment method for your delivery region.' })
+      }
+      if (paymentMethod === 'Card' && !stripe) return json(res, 503, { error: 'Card payments are temporarily unavailable.' })
       const lines = orderLinesForStore(store, input.lines)
       const shippingFee = shippingFeeForCountry(customer.country)
-      const total = lines.reduce((sum, line) => sum + line.price * line.quantity, 0) + shippingFee
+      const total = roundAed(lines.reduce((sum, line) => sum + line.price * line.quantity, 0) + shippingFee)
       const draft = { id: crypto.randomUUID(), customer, lines, shippingFee, total, createdAt: new Date().toISOString() }
+      if (paymentMethod === 'Cash') {
+        if (!customer.countryName) return json(res, 400, { error: 'Enter your delivery country.' })
+        const order = { ...newOrder(draft, 'Cash', 'Awaiting payment'), stripeFee: 0 }
+        store.orders.unshift(order)
+        try {
+          await writeStore(store)
+        } catch (error) {
+          store.orders = store.orders.filter(item => item.id !== order.id)
+          throw error
+        }
+        return json(res, 201, { orderId: order.id })
+      }
       store.pendingCheckouts.unshift(draft)
       await writeStore(store)
       try {
@@ -661,7 +706,47 @@ const server = http.createServer(async (req, res) => {
     }
     if (route === '/api/orders' && req.method === 'GET') { if (!requireAdmin(req, res)) return; return json(res, 200, store.orders) }
     const orderMatch = route.match(/^\/api\/orders\/([^/]+)$/)
-    if (orderMatch && req.method === 'PATCH') { if (!requireAdmin(req, res)) return; const orderId = decodeURIComponent(orderMatch[1]); const input = await body(req); const order = store.orders.find(item => item.id === orderId); if (!order) return json(res, 404, { error: 'Order not found.' }); if (!['Pending', 'Processing', 'Shipped', 'Completed', 'Cancelled'].includes(input.status)) return json(res, 400, { error: 'Invalid order status.' }); order.status = input.status; await writeStore(store); return json(res, 200, order) }
+    if (orderMatch && req.method === 'PATCH') {
+      if (!requireAdmin(req, res)) return
+      const input = await body(req)
+      const order = store.orders.find(item => item.id === decodeURIComponent(orderMatch[1]))
+      if (!order) return json(res, 404, { error: 'Order not found.' })
+      if (input.confirmCashPayment === true) {
+        if (order.paymentMethod !== 'Cash' || order.status === 'Cancelled') return json(res, 409, { error: 'This order cannot be marked cash paid.' })
+        if (order.paymentStatus === 'Paid') return json(res, 200, order)
+        let lines
+        try { lines = orderLinesForStore(store, order.lines) } catch (error) {
+          return json(res, 409, { error: error.message })
+        }
+        for (const line of lines) store.products.find(product => product.id === line.productId).stock -= line.quantity
+        order.paymentStatus = 'Paid'
+        order.paidAt = new Date().toISOString()
+        try {
+          await writeStore(store)
+        } catch (error) {
+          const current = readStore()
+          const currentOrder = current.orders.find(item => item.id === order.id)
+          if (currentOrder) {
+            currentOrder.paymentStatus = 'Awaiting payment'
+            delete currentOrder.paidAt
+          }
+          for (const line of lines) {
+            const product = current.products.find(item => item.id === line.productId)
+            if (product) product.stock += line.quantity
+          }
+          throw error
+        }
+        await recordWebsiteOrderMovements(order)
+        return json(res, 200, order)
+      }
+      if (!['Pending', 'Processing', 'Shipped', 'Completed', 'Cancelled'].includes(input.status)) return json(res, 400, { error: 'Invalid order status.' })
+      if (order.paymentMethod === 'Cash' && order.paymentStatus !== 'Paid' && input.status === 'Completed') {
+        return json(res, 409, { error: 'Record the cash payment before completing this order.' })
+      }
+      order.status = input.status
+      await writeStore(store)
+      return json(res, 200, order)
+    }
     if (route.startsWith('/uploads/')) {
       const fileName = path.basename(route)
       const storedFile = path.join(uploadDir, fileName)

@@ -1,6 +1,7 @@
-import { type CSSProperties, type FormEvent, useEffect, useState } from 'react'
+import { type CSSProperties, type FormEvent, useEffect, useRef, useState } from 'react'
 import ProductsAdminV2 from './ProductsAdmin'
 import AccountantTest from './AccountantTest'
+import { roundAed, shippingFeeForCountry } from './pricing'
 
 type View = 'shop' | 'cart' | 'orders' | 'products' | 'accountant' | 'admin'
 type OrderStatus = 'Pending' | 'Processing' | 'Shipped' | 'Completed' | 'Cancelled'
@@ -39,13 +40,14 @@ type OrderLine = CartLine & { price?: number }
 type Order = {
   id: string
   date: string
-  customer: { name: string; email: string; phone: string; address: string; country?: 'AE' | 'OTHER'; notes: string }
+  customer: { name: string; email: string; phone: string; address: string; country?: 'AE' | 'OTHER'; countryName?: string; notes: string }
   lines: OrderLine[]
   shippingFee?: number
   stripeFee?: number
   total: number
   status: OrderStatus
   paymentStatus?: string
+  paymentMethod?: 'Cash' | 'Card'
 }
 
 const logo = '/assets/fragrance-land-logo.png'
@@ -77,8 +79,7 @@ function money(value: number) { return `AED ${value.toFixed(2)}` }
 function asSizeOption(size: SizeOption | number): SizeOption { return typeof size === 'number' ? { value: size, unit: 'ml' } : size }
 function sizeKey(size: SizeOption | number) { const option = asSizeOption(size); return `${option.value}-${option.unit}` }
 function sizeLabel(size: SizeOption | number) { const option = asSizeOption(size); return `${option.value} ${option.unit}` }
-function productPrice(product: Product) { return product.price * (1 - (product.discountPercent || 0) / 100) }
-function shippingFeeForCountry(country: string) { return country === 'AE' ? 25 : 80 }
+function productPrice(product: Product) { return roundAed(product.price * (1 - (product.discountPercent || 0) / 100)) }
 function priceMarkup(product: Product, quantity = 1) { const sale = productPrice(product) * quantity; return product.discountPercent > 0 ? <><del>{money(product.price * quantity)}</del> <span className="sale-price">{money(sale)}</span></> : money(sale) }
 function categoryLabel(id: string, categories: Category[]) { const category = categories.find(item => item.id === id); return category ? `${category.nameEn} · ${category.nameAr}` : id }
 function getView(): View { const path = window.location.pathname; return path === '/admin' || path === '/admin/' ? 'admin' : path === '/admin/accountant' || path === '/admin/accountant/' || path === '/accountant-test' || path === '/accountant-test/' ? 'accountant' : path.includes('cart') ? 'cart' : path.includes('orders') ? 'orders' : path.includes('products') ? 'products' : 'shop' }
@@ -103,6 +104,9 @@ export default function App() {
   const [showLogin, setShowLogin] = useState(false)
   const [authError, setAuthError] = useState('')
   const [accountantEnabled, setAccountantEnabled] = useState<boolean | null>(null)
+  const [checkoutBusy, setCheckoutBusy] = useState(false)
+  const [checkoutError, setCheckoutError] = useState('')
+  const [cashOrderId, setCashOrderId] = useState('')
 
   const activeProducts = products.filter(product => product.active)
   const cartCount = cart.reduce((sum, line) => sum + line.quantity, 0)
@@ -187,6 +191,13 @@ export default function App() {
   }
 
   function addToCart(productId: string, size: SizeOption, quantity: number) {
+    const stock = products.find(product => product.id === productId)?.stock ?? 0
+    const currentQuantity = cart.filter(line => line.productId === productId).reduce((sum, line) => sum + line.quantity, 0)
+    if (currentQuantity + quantity > stock) {
+      setNotice('There is not enough stock to add this quantity.')
+      window.setTimeout(() => setNotice(''), 3000)
+      return
+    }
     setCart(current => {
       const found = current.find(line => line.productId === productId && sizeKey(line.size) === sizeKey(size))
       return found ? current.map(line => line === found ? { ...line, quantity: line.quantity + quantity } : line) : [...current, { productId, size, quantity }]
@@ -197,18 +208,36 @@ export default function App() {
   }
 
   function updateLine(line: CartLine, quantity: number) {
+    const stock = products.find(product => product.id === line.productId)?.stock ?? 0
+    const otherSizes = cart.filter(item => item !== line && item.productId === line.productId).reduce((sum, item) => sum + item.quantity, 0)
+    if (quantity > line.quantity && quantity + otherSizes > stock) {
+      setCheckoutError('There is not enough stock to increase that quantity.')
+      return
+    }
+    setCheckoutError('')
     setCart(current => quantity < 1 ? current.filter(item => item !== line) : current.map(item => item === line ? { ...item, quantity } : item))
   }
 
   async function submitOrder(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (checkoutBusy) return
     const form = new FormData(event.currentTarget)
-    const customer = { name: String(form.get('name')), email: String(form.get('email') || ''), phone: String(form.get('phone')), address: String(form.get('address') || ''), country: String(form.get('country') || 'AE'), notes: String(form.get('notes') || '') }
+    const customer = Object.fromEntries(['name', 'email', 'phone', 'address', 'country', 'countryName', 'notes'].map(field => [field, String(form.get(field) || '')]))
+    const paymentMethod = form.get('paymentMethod') || 'Card'
+    setCheckoutBusy(true)
+    setCheckoutError('')
     try {
-      const checkout = await apiJson<{ url: string }>('/api/checkout/session', { method: 'POST', body: JSON.stringify({ customer, lines: cart }) })
-      window.location.assign(checkout.url)
-    } catch (error) { setNotice(error instanceof Error ? error.message : 'Unable to place the order.') }
-    window.setTimeout(() => setNotice(''), 3500)
+      const checkout = await apiJson<{ url?: string; orderId?: string }>('/api/checkout/session', { method: 'POST', body: JSON.stringify({ customer, lines: cart, paymentMethod }) })
+      if (checkout.url) window.location.assign(checkout.url)
+      else if (checkout.orderId) {
+        setCashOrderId(checkout.orderId)
+        setCart([])
+      } else throw new Error('Unable to place the order. Please try again.')
+    } catch (error) {
+      setCheckoutError(error instanceof Error ? error.message : 'Unable to place the order.')
+    } finally {
+      setCheckoutBusy(false)
+    }
   }
 
   async function loginAdmin(email: string, password: string) {
@@ -251,11 +280,16 @@ export default function App() {
     setOrders(current => current.map(order => order.id === updated.id ? updated : order))
   }
 
+  async function confirmCashPayment(id: string) {
+    const updated = await apiJson<Order>(`/api/orders/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ confirmCashPayment: true }) })
+    setOrders(current => current.map(order => order.id === updated.id ? updated : order))
+  }
+
   return <div className="app-shell">
     <Header view={view} cartCount={cartCount} adminMode={adminMode} accountantEnabled={accountantEnabled === true} onNavigate={navigate} onLogout={logoutAdmin} />
     {view === 'shop' && <Shop products={activeProducts} categories={categories} onProduct={openProduct} onNavigate={navigate} />}
-    {view === 'cart' && <Cart products={products} categories={categories} cart={cart} total={cartTotal} onUpdate={updateLine} onNavigate={navigate} onSubmit={submitOrder} />}
-    {view === 'orders' && adminMode && <Orders orders={orders} products={products} onStatus={updateOrderStatus} />}
+    {view === 'cart' && <Cart products={products} categories={categories} cart={cart} total={cartTotal} onUpdate={updateLine} onNavigate={navigate} onSubmit={submitOrder} busy={checkoutBusy} error={checkoutError} cashOrderId={cashOrderId} />}
+    {view === 'orders' && adminMode && <Orders orders={orders} products={products} onStatus={updateOrderStatus} onCashPayment={confirmCashPayment} />}
     {view === 'products' && adminMode && <ProductsAdminV2 products={products} categories={categories} onSave={saveProduct} onDelete={deleteProduct} onSaveCategory={saveCategory} onDeleteCategory={deleteCategory} />}
     {view === 'accountant' && adminMode && accountantEnabled && <AccountantTest products={products} />}
     {view === 'admin' && !adminMode && <AdminLocked onSignIn={() => { setAuthError(''); setShowLogin(true) }} />}
@@ -272,7 +306,7 @@ function Header({ view, cartCount, adminMode, accountantEnabled, onNavigate, onL
   return <header className="site-header">
     <div className="header-inner">
       <button className="brand" onClick={() => nav('shop')} aria-label="Go to Fragrance Land home"><img src={logo} alt="Fragrance Land" /></button>
-      <div className="mobile-actions"><button className="mobile-cart" onClick={() => nav('cart')} aria-label={`Your cart ${cartCount}`}>{icon('bag')}<span className="cart-count">{cartCount}</span></button><button className="mobile-menu" onClick={() => setMobileOpen(open => !open)} aria-label="Toggle menu">{icon('menu')}</button></div>
+      <div className="mobile-actions"><button className="mobile-cart" onClick={() => nav('cart')} aria-label={`Your cart ${cartCount}`}>{icon('bag')}<span className="cart-count">{cartCount}</span></button>{adminMode && <button className="mobile-menu" onClick={() => setMobileOpen(open => !open)} aria-label="Toggle admin menu" aria-expanded={mobileOpen}>{icon('menu')}</button>}</div>
       <nav className={mobileOpen ? 'main-nav open' : 'main-nav'}>
         <button className={view === 'shop' ? 'nav-link active' : 'nav-link'} onClick={() => nav('shop')}>Shop perfumes</button>
         <button className={view === 'cart' ? 'nav-link cart-nav active' : 'nav-link cart-nav'} onClick={() => nav('cart')} aria-label={`Your cart ${cartCount}`}>{icon('bag')}<span className="cart-count">{cartCount}</span></button>
@@ -305,52 +339,169 @@ function Shop({ products, categories, onProduct, onNavigate }: { products: Produ
 
 function ProductCard({ product, categoryText, onClick }: { product: Product; categoryText: string; onClick: () => void }) { return <button className="product-card" onClick={onClick}><div className="product-visual" style={{ '--accent': product.accent } as CSSProperties}><img src={product.images[0]} alt={product.name} loading="lazy" /><span className="product-tag">{categoryText}</span>{product.discountPercent > 0 && <span className="discount-badge">-{product.discountPercent}%</span>}<span className="quick-view">Quick view {icon('arrow')}</span></div><div className="product-card-meta"><div><h3>{product.name}</h3><p>{product.subtitle}</p></div><strong className={product.discountPercent > 0 ? 'has-sale' : ''}>{priceMarkup(product)}</strong></div></button> }
 
-function ProductModal({ product, categories, selectedSize, selectedQuantity, onSize, onQuantity, onClose, onAdd }: { product: Product; categories: Category[]; selectedSize: SizeOption; selectedQuantity: number; onSize: (size: SizeOption) => void; onQuantity: (quantity: number) => void; onClose: () => void; onAdd: () => void }) { return <div className="modal-backdrop" role="presentation" onMouseDown={event => event.target === event.currentTarget && onClose()}><div className="product-modal" role="dialog" aria-modal="true" aria-label={product.name}><button className="modal-close" onClick={onClose} aria-label="Close product details">{icon('close')}</button><div className="modal-gallery"><img src={product.images[0]} alt={product.name} /><div className="gallery-dots"><span className="active" /><span /><span /></div></div><div className="modal-content"><p className="eyebrow">{categoryLabel(product.category, categories)} / Fragrance Land</p><h2>{product.name}</h2><p className="modal-subtitle">{product.subtitle}</p><p className="modal-description">{product.description}</p><div className="notes"><p className="label">The notes</p><div>{product.notes.map(note => <span key={note}>{note}</span>)}</div></div><div className="modal-option"><p className="label">Size</p><div className="size-options">{product.sizes.map(size => <button key={sizeKey(size)} className={sizeKey(selectedSize) === sizeKey(size) ? 'size-option active' : 'size-option'} onClick={() => onSize(size)}>{sizeLabel(size)}</button>)}</div></div><div className="modal-buy"><div className="quantity-control"><button onClick={() => onQuantity(Math.max(1, selectedQuantity - 1))} aria-label="Decrease quantity">{icon('minus')}</button><span>{selectedQuantity}</span><button onClick={() => onQuantity(selectedQuantity + 1)} aria-label="Increase quantity">{icon('plus')}</button></div><button className="button button-dark add-button" onClick={onAdd}>Add to cart <span>{priceMarkup(product, selectedQuantity)}</span></button></div></div></div></div> }
+function ProductModal({ product, categories, selectedSize, selectedQuantity, onSize, onQuantity, onClose, onAdd }: { product: Product; categories: Category[]; selectedSize: SizeOption; selectedQuantity: number; onSize: (size: SizeOption) => void; onQuantity: (quantity: number) => void; onClose: () => void; onAdd: () => void }) {
+  const dialog = useRef<HTMLDialogElement>(null)
+  const [imageIndex, setImageIndex] = useState(0)
+  const images = [...new Set(product.images)]
+  useEffect(() => {
+    const element = dialog.current
+    element?.showModal()
+    return () => element?.close()
+  }, [])
 
-function Cart({ products, categories, cart, total, onUpdate, onNavigate, onSubmit }: { products: Product[]; categories: Category[]; cart: CartLine[]; total: number; onUpdate: (line: CartLine, quantity: number) => void; onNavigate: (view: View) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
-  const [country, setCountry] = useState('AE')
-  const shipping = shippingFeeForCountry(country)
-  const grandTotal = total + shipping
-  return <main className="page-wrap"><div className="page-intro"><p className="eyebrow">Your collection</p><h1>Take your favorites<br /><em>home with you.</em></h1></div>{cart.length === 0 ? <div className="empty-cart"><div className="empty-cart-mark">{icon('bag')}</div><h2>Your cart is waiting.</h2><p>Start with one scent and see where it takes you.</p><button className="button button-dark" onClick={() => onNavigate('shop')}>Explore perfumes {icon('arrow')}</button></div> : <div className="cart-layout"><section className="cart-lines"><div className="cart-section-title"><h2>Selected scents</h2><span>{cart.length} {cart.length === 1 ? 'item' : 'items'}</span></div>{cart.map(line => { const product = products.find(item => item.id === line.productId); if (!product) return null; return <div className="cart-line" key={`${line.productId}-${sizeKey(line.size)}`}><img src={product.images[0]} alt={product.name} /><div className="cart-line-info"><p className="eyebrow">{categoryLabel(product.category, categories)}</p><h3>{product.name}</h3><p>{sizeLabel(line.size)} · {product.discountPercent > 0 && <del>{money(product.price)}</del>} {money(productPrice(product))}</p></div><div className="quantity-control"><button onClick={() => onUpdate(line, line.quantity - 1)} aria-label="Decrease quantity">{icon('minus')}</button><span>{line.quantity}</span><button onClick={() => onUpdate(line, line.quantity + 1)} aria-label="Increase quantity">{icon('plus')}</button></div><strong className={product.discountPercent > 0 ? 'has-sale' : ''}>{priceMarkup(product, line.quantity)}</strong><button className="remove-button" onClick={() => onUpdate(line, 0)}>Remove</button></div>})}<button className="text-button back-button" onClick={() => onNavigate('shop')}>← Continue shopping</button></section><section className="checkout-card"><div className="checkout-summary"><div><span>Subtotal</span><strong>{money(total)}</strong></div><div><span>Delivery</span><strong>{money(shipping)}</strong></div><div className="total-row"><span>Total</span><strong>{money(grandTotal)}</strong></div></div><div className="checkout-divider" /><form onSubmit={onSubmit}><div className="checkout-title"><p className="eyebrow">Almost yours</p><h2>Delivery details</h2></div><label>Full name<input required name="name" placeholder="Your name" /></label><label>Email address <span className="optional">optional</span><input type="email" name="email" placeholder="you@example.com" /></label><label>Phone<input required name="phone" placeholder="+971" /></label><label>Country / region<select required name="country" value={country} onChange={event => setCountry(event.target.value)}><option value="AE">United Arab Emirates</option><option value="OTHER">Outside UAE</option></select></label><label>Full address<textarea required name="address" placeholder="Building, street, area, city"></textarea></label><label>Notes <span className="optional">optional</span><textarea name="notes" placeholder="Anything we should know?"></textarea></label><button className="button button-dark full-button" type="submit">Continue to secure payment {icon('arrow')}</button><p className="secure-note">Secure payment powered by Stripe.</p></form></section></div>}</main>
+  return <dialog ref={dialog} className="product-dialog" aria-label={product.name}
+    onCancel={event => { event.preventDefault(); onClose() }}
+    onClick={event => { if (event.target === event.currentTarget) onClose() }}>
+    <div className="product-modal">
+      <button className="modal-close" onClick={onClose} aria-label="Close product details">{icon('close')}</button>
+      <div className="modal-gallery">
+        <img src={images[imageIndex]} alt={product.name} />
+        {images.length > 1 && <div className="gallery-dots">{images.map((src, index) =>
+          <button key={src} onClick={() => setImageIndex(index)} aria-label={`Show image ${index + 1}`} aria-pressed={index === imageIndex} />)}</div>}
+      </div>
+      <div className="modal-content">
+        <p className="eyebrow">{categoryLabel(product.category, categories)}</p>
+        <h2>{product.name}</h2><p className="modal-subtitle">{product.subtitle}</p><p className="modal-description">{product.description}</p>
+        {product.notes.length > 0 && <div className="notes"><p className="label">Fragrance notes</p><div>{product.notes.map(note => <span key={note}>{note}</span>)}</div></div>}
+        <div className="modal-option"><p className="label">Size</p><div className="size-options">{product.sizes.map(size =>
+          <button key={sizeKey(size)} className={sizeKey(selectedSize) === sizeKey(size) ? 'size-option active' : 'size-option'} onClick={() => onSize(size)} aria-pressed={sizeKey(selectedSize) === sizeKey(size)}>{sizeLabel(size)}</button>)}</div></div>
+        <div className="modal-buy">
+          {product.stock > 0 && <div className="quantity-control">
+            <button disabled={selectedQuantity <= 1} onClick={() => onQuantity(selectedQuantity - 1)} aria-label="Decrease quantity">{icon('minus')}</button>
+            <span>{selectedQuantity}</span>
+            <button disabled={selectedQuantity >= product.stock} onClick={() => onQuantity(selectedQuantity + 1)} aria-label="Increase quantity">{icon('plus')}</button>
+          </div>}
+          <button className="button button-dark add-button" disabled={product.stock < 1} onClick={onAdd}>{product.stock < 1 ? 'Sold out' : <>Add to cart <span>{priceMarkup(product, selectedQuantity)}</span></>}</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
 }
 
-function Orders({ orders, products, onStatus }: { orders: Order[]; products: Product[]; onStatus: (id: string, status: OrderStatus) => void }) {
+function Cart({ products, categories, cart, total, onUpdate, onNavigate, onSubmit, busy, error, cashOrderId }: {
+  products: Product[]; categories: Category[]; cart: CartLine[]; total: number
+  onUpdate: (line: CartLine, quantity: number) => void
+  onNavigate: (view: View) => void
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void
+  busy: boolean; error: string; cashOrderId: string
+}) {
+  const [country, setCountry] = useState('AE')
+  const [payment, setPayment] = useState('Card')
+  const isCash = country === 'OTHER' && payment === 'Cash'
+  const shipping = shippingFeeForCountry(country)
+
+  if (!cart.length) return <main className="page-wrap">
+    <div className="page-intro"><h1>{cashOrderId ? 'Order received' : 'Your cart'}</h1></div>
+    <div className="empty-cart">
+      <div className="empty-cart-mark">{icon(cashOrderId ? 'check' : 'bag')}</div>
+      <h2>{cashOrderId || 'Your cart is empty'}</h2>
+      <p>{cashOrderId ? 'We’ll contact you to arrange cash payment and delivery.' : 'Browse the collection to find your next fragrance.'}</p>
+      <button className="button button-dark" onClick={() => onNavigate('shop')}>Explore perfumes {icon('arrow')}</button>
+    </div>
+  </main>
+
+  return <main className="page-wrap">
+    <div className="page-intro"><h1>Your cart</h1></div>
+    <div className="cart-layout">
+      <section className="cart-lines">
+        <div className="cart-section-title"><h2>Selected scents</h2><span>{cart.reduce((sum, line) => sum + line.quantity, 0)} items</span></div>
+        {cart.map(line => {
+          const product = products.find(item => item.id === line.productId)
+          if (!product) return null
+          return <div className="cart-line" key={`${line.productId}-${sizeKey(line.size)}`}>
+            <img src={product.images[0]} alt={product.name} />
+            <div className="cart-line-info"><p className="eyebrow">{categoryLabel(product.category, categories)}</p><h3>{product.name}</h3><p>{sizeLabel(line.size)} · {money(productPrice(product))}</p></div>
+            <div className="quantity-control"><button disabled={busy || line.quantity <= 1} onClick={() => onUpdate(line, line.quantity - 1)} aria-label={`Decrease ${product.name} quantity`}>{icon('minus')}</button><span>{line.quantity}</span><button disabled={busy} onClick={() => onUpdate(line, line.quantity + 1)} aria-label={`Increase ${product.name} quantity`}>{icon('plus')}</button></div>
+            <strong>{priceMarkup(product, line.quantity)}</strong>
+            <button className="remove-button" disabled={busy} onClick={() => onUpdate(line, 0)} aria-label={`Remove ${product.name}`}>Remove</button>
+          </div>
+        })}
+        <button className="text-button back-button" onClick={() => onNavigate('shop')}>← Continue shopping</button>
+      </section>
+      <section className="checkout-card">
+        <form onSubmit={onSubmit}>
+          <fieldset className="checkout-fields" disabled={busy}>
+            <div className="checkout-title"><h2>Delivery details</h2></div>
+            <label>Delivery region<select required name="country" value={country} onChange={event => { setCountry(event.target.value); setPayment('Card') }}>
+              <option value="AE">United Arab Emirates</option><option value="OTHER">Outside UAE</option>
+            </select></label>
+            {country === 'OTHER' && <label>Destination country<input required name="countryName" maxLength={100} autoComplete="country-name" placeholder="Enter your country" /></label>}
+            <label>Full name<input required name="name" maxLength={120} autoComplete="name" placeholder="Your name" /></label>
+            <label>Phone<input required type="tel" name="phone" maxLength={40} autoComplete="tel" placeholder={country === 'AE' ? '+971' : 'Include your country code'} /></label>
+            <label>Full address<textarea required name="address" maxLength={240} autoComplete="street-address" placeholder="Building, street, area, city" /></label>
+            <label>Email address <span className="optional">optional</span><input type="email" name="email" maxLength={254} autoComplete="email" placeholder="you@example.com" /></label>
+            <label>Delivery notes <span className="optional">optional</span><textarea name="notes" maxLength={1000} /></label>
+            {country === 'OTHER' && <label>Payment method<select name="paymentMethod" value={payment} onChange={event => setPayment(event.target.value)}>
+              <option value="Card">Card via Stripe</option><option value="Cash">Cash · arrange with us</option>
+            </select></label>}
+          </fieldset>
+          <div className="checkout-summary" aria-live="polite">
+            <div><span>Products</span><strong>{money(total)}</strong></div>
+            <div><span>Delivery</span><strong>{money(shipping)}</strong></div>
+            <div className="total-row"><span>Order total</span><strong>{money(total + shipping)}</strong></div>
+          </div>
+          {error && <p className="field-error" role="alert">{error}</p>}
+          <button className="button button-dark full-button" disabled={busy} type="submit">{busy ? 'Processing…' : isCash ? 'Place cash order' : 'Continue to secure payment'} {icon('arrow')}</button>
+          <p className="secure-note">{isCash ? 'We’ll contact you to arrange cash payment and delivery.' : 'Secure payment powered by Stripe.'}</p>
+        </form>
+      </section>
+    </div>
+  </main>
+}
+
+function Orders({ orders, products, onStatus, onCashPayment }: { orders: Order[]; products: Product[]; onStatus: (id: string, status: OrderStatus) => Promise<void>; onCashPayment: (id: string) => Promise<void> }) {
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null)
   const selectedOrder = orders.find(order => order.id === selectedOrderId)
+  const [orderError, setOrderError] = useState('')
+  const [savingOrder, setSavingOrder] = useState(false)
+
+  async function saveOrder(change: () => Promise<void>) {
+    setOrderError('')
+    setSavingOrder(true)
+    try { await change() } catch (error) {
+      setOrderError(error instanceof Error ? error.message : 'Unable to update this order.')
+    } finally { setSavingOrder(false) }
+  }
 
   useEffect(() => {
     if (selectedOrderId && !selectedOrder) setSelectedOrderId(null)
   }, [selectedOrderId, selectedOrder])
 
   return <main className="admin-page page-wrap">
-    <div className="admin-intro"><div><p className="eyebrow">Admin / Operations</p><h1>Orders <em>coming in.</em></h1><p className="admin-refresh-note">Paid website orders · updates automatically</p></div><div className="admin-stat"><span>{orders.filter(order => order.status === 'Pending').length}</span><small>awaiting attention</small></div></div>
+    <div className="admin-intro"><div><p className="eyebrow">Admin / Operations</p><h1>Orders <em>coming in.</em></h1><p className="admin-refresh-note">Website orders and payment status</p></div><div className="admin-stat"><span>{orders.filter(order => order.status === 'Pending').length}</span><small>awaiting attention</small></div></div>
+    {orderError && <p className="field-error" role="alert">{orderError}</p>}
     <div className="admin-table">
       <div className="table-head"><span>Order</span><span>Customer</span><span>Items</span><span>Total</span><span>Status</span></div>
       {orders.map(order => <div className={selectedOrderId === order.id ? 'table-row order-row selected' : 'table-row order-row'} key={order.id} role="button" tabIndex={0} onClick={() => setSelectedOrderId(order.id)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') setSelectedOrderId(order.id) }}>
-        <div><strong>{order.id}</strong><small>{order.date}</small><small className="row-detail-hint">View details</small></div>
+        <div><strong>{order.id}</strong><small>{order.date}</small><small>{order.paymentMethod === 'Cash' ? (order.paymentStatus === 'Paid' ? 'Cash paid' : 'Cash pending') : 'Card'}</small><small className="row-detail-hint">View details</small></div>
         <div><strong>{order.customer.name}</strong><small>{order.customer.email}</small></div>
         <div><strong>{order.lines.reduce((sum, line) => sum + line.quantity, 0)} items</strong><small>{order.lines.map(line => products.find(product => product.id === line.productId)?.name || 'Product').join(', ')}</small></div>
         <strong>{money(order.total)}</strong>
-        <select className={`status-select ${order.status.toLowerCase()}`} value={order.status} onClick={event => event.stopPropagation()} onChange={event => onStatus(order.id, event.target.value as OrderStatus)}>{(['Pending', 'Processing', 'Shipped', 'Completed', 'Cancelled'] as OrderStatus[]).map(status => <option key={status}>{status}</option>)}</select>
+        <select className={`status-select ${order.status.toLowerCase()}`} aria-label={`Status for ${order.id}`} disabled={savingOrder} value={order.status} onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()} onChange={event => { const status = event.target.value as OrderStatus; void saveOrder(() => onStatus(order.id, status)) }}>{(['Pending', 'Processing', 'Shipped', 'Completed', 'Cancelled'] as OrderStatus[]).map(status => <option key={status}>{status}</option>)}</select>
       </div>)}
-      {!orders.length && <div className="orders-empty"><h2>No paid orders yet.</h2><p>Completed Stripe payments will appear here automatically.</p></div>}
+      {!orders.length && <div className="orders-empty"><h2>No orders yet.</h2><p>Website orders will appear here automatically.</p></div>}
     </div>
-    {selectedOrder && <OrderDetails order={selectedOrder} products={products} onClose={() => setSelectedOrderId(null)} />}
+    {selectedOrder && <OrderDetails order={selectedOrder} products={products} onClose={() => setSelectedOrderId(null)} onCashPayment={() => void saveOrder(() => onCashPayment(selectedOrder.id))} saving={savingOrder} />}
   </main>
 }
 
-function OrderDetails({ order, products, onClose }: { order: Order; products: Product[]; onClose: () => void }) {
+function OrderDetails({ order, products, onClose, onCashPayment, saving }: { order: Order; products: Product[]; onClose: () => void; onCashPayment: () => void; saving: boolean }) {
+  const awaitingCash = order.paymentMethod === 'Cash' && order.paymentStatus !== 'Paid'
   return <section className="order-details" aria-label={`Details for ${order.id}`}>
-    <div className="order-details-heading"><div><p className="eyebrow">Order details</p><h2>{order.id}</h2><p>{order.date}</p></div><div className="order-details-actions"><span className="payment-badge">{order.paymentStatus || 'Paid via Stripe'}</span><button className="icon-button" onClick={onClose} aria-label="Close order details">{icon('close')}</button></div></div>
+    <div className="order-details-heading"><div><p className="eyebrow">Order details</p><h2>{order.id}</h2><p>{order.date}</p></div><div className="order-details-actions"><span className="payment-badge">{order.paymentMethod === 'Cash' ? (awaitingCash ? 'Cash pending' : 'Cash paid') : (order.paymentStatus || 'Paid via Stripe')}</span><button className="icon-button" onClick={onClose} aria-label="Close order details">{icon('close')}</button></div></div>
     <div className="order-details-grid">
-      <div className="order-customer-card"><p className="label">Customer</p><h3>{order.customer.name}</h3><dl><div><dt>Email</dt><dd>{order.customer.email || 'Not provided'}</dd></div><div><dt>Phone</dt><dd>{order.customer.phone}</dd></div><div><dt>Country</dt><dd>{order.customer.country === 'AE' ? 'United Arab Emirates' : order.customer.country === 'OTHER' ? 'Outside UAE' : 'Not provided'}</dd></div><div><dt>Address</dt><dd>{order.customer.address || 'Not provided'}</dd></div>{order.customer.notes && <div><dt>Notes</dt><dd>{order.customer.notes}</dd></div>}</dl></div>
-      <div className="order-items-card"><div className="order-items-heading"><p className="label">Items</p><span>{order.lines.reduce((sum, line) => sum + line.quantity, 0)} items</span></div>{order.lines.map((line, index) => { const product = products.find(item => item.id === line.productId); const unitPrice = line.price ?? (product ? productPrice(product) : 0); return <div className="order-item" key={`${line.productId}-${sizeKey(line.size)}-${index}`}><img src={product?.images[0]} alt={product?.name || 'Product'} /><div><strong>{product?.name || 'Product unavailable'}</strong><p>{sizeLabel(line.size)} · Qty {line.quantity}</p></div><span>{money(unitPrice * line.quantity)}</span></div> })}{typeof order.shippingFee === 'number' && <div className="order-total"><span>Shipping</span><strong>{money(order.shippingFee)}</strong></div>}{typeof order.stripeFee === 'number' && order.stripeFee > 0 && <div className="order-total"><span>Stripe fee</span><strong>{money(order.stripeFee)}</strong></div>}<div className="order-total"><span>Total paid</span><strong>{money(order.total)}</strong></div></div>
+      <div className="order-customer-card"><p className="label">Customer</p><h3>{order.customer.name}</h3><dl><div><dt>Email</dt><dd>{order.customer.email || 'Not provided'}</dd></div><div><dt>Phone</dt><dd>{order.customer.phone}</dd></div><div><dt>Country</dt><dd>{order.customer.country === 'AE' ? 'United Arab Emirates' : order.customer.country === 'OTHER' ? (order.customer.countryName || 'Outside UAE') : 'Not provided'}</dd></div><div><dt>Address</dt><dd>{order.customer.address || 'Not provided'}</dd></div>{order.customer.notes && <div><dt>Notes</dt><dd>{order.customer.notes}</dd></div>}</dl></div>
+      <div className="order-items-card"><div className="order-items-heading"><p className="label">Items</p><span>{order.lines.reduce((sum, line) => sum + line.quantity, 0)} items</span></div>{order.lines.map((line, index) => { const product = products.find(item => item.id === line.productId); const unitPrice = line.price ?? (product ? productPrice(product) : 0); return <div className="order-item" key={`${line.productId}-${sizeKey(line.size)}-${index}`}><img src={product?.images[0]} alt={product?.name || 'Product'} /><div><strong>{product?.name || 'Product unavailable'}</strong><p>{sizeLabel(line.size)} · Qty {line.quantity}</p></div><span>{money(unitPrice * line.quantity)}</span></div> })}{typeof order.shippingFee === 'number' && <div className="order-total"><span>Shipping</span><strong>{money(order.shippingFee)}</strong></div>}{typeof order.stripeFee === 'number' && order.stripeFee > 0 && <div className="order-total"><span>Stripe fee</span><strong>{money(order.stripeFee)}</strong></div>}<div className="order-total"><span>{awaitingCash ? 'Amount due' : 'Total paid'}</span><strong>{money(order.total)}</strong></div></div>
     </div>
+    {awaitingCash && order.status !== 'Cancelled' && <div className="order-cash-action">
+      <p>Record payment once you receive the cash. Stock is deducted when payment is recorded.</p>
+      <button className="button button-dark" disabled={saving} onClick={onCashPayment}>Mark cash as received</button>
+    </div>}
   </section>
 }
 
 
 function AdminLocked({ onSignIn }: { onSignIn: () => void }) { return <main className="admin-locked page-wrap"><div className="locked-mark">{icon('sparkle')}</div><p className="eyebrow">Private studio / Admin</p><h1>Welcome <em>back.</em></h1><p>Sign in to manage orders, inventory and product images.</p><button className="button button-dark" onClick={onSignIn}>Sign in to admin {icon('arrow')}</button></main> }
 function AdminRouteGuard({ onNavigate }: { onNavigate: (view: View) => void }) { return <main className="admin-locked page-wrap"><div className="locked-mark">{icon('sparkle')}</div><p className="eyebrow">Private studio</p><h1>This area is <em>private.</em></h1><p>Admin sign in is available only from the private admin page.</p><button className="button button-dark" onClick={() => onNavigate('admin')}>Go to admin sign in {icon('arrow')}</button></main> }
-function AdminLogin({ onClose, onLogin, error }: { onClose: () => void; onLogin: (email: string, password: string) => Promise<void>; error: string }) { const [email, setEmail] = useState('admin@fragranceland.local'); const [password, setPassword] = useState('admin123'); const [busy, setBusy] = useState(false); async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setBusy(true); await onLogin(email, password); setBusy(false) } return <div className="modal-backdrop" role="presentation" onMouseDown={event => event.target === event.currentTarget && onClose()}><div className="login-card" role="dialog" aria-modal="true" aria-label="Admin sign in"><button className="modal-close" onClick={onClose} aria-label="Close admin sign in">{icon('close')}</button><p className="eyebrow">Fragrance Land / Private studio</p><h2>Welcome back.</h2><p className="login-copy">Sign in to manage your catalog and incoming orders.</p><form onSubmit={submit}><label>Email address<input required type="email" value={email} onChange={event => setEmail(event.target.value)} /></label><label>Password<input required type="password" value={password} onChange={event => setPassword(event.target.value)} /></label>{error && <p className="field-error">{error}</p>}<button className="button button-dark full-button" disabled={busy} type="submit">{busy ? 'Signing in…' : 'Sign in'} {icon('arrow')}</button><p className="login-hint">Local default: admin@fragranceland.local / admin123</p></form></div></div> }
+function AdminLogin({ onClose, onLogin, error }: { onClose: () => void; onLogin: (email: string, password: string) => Promise<void>; error: string }) { const [email, setEmail] = useState(''); const [password, setPassword] = useState(''); const [busy, setBusy] = useState(false); async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setBusy(true); await onLogin(email, password); setBusy(false) } return <div className="modal-backdrop" role="presentation" onMouseDown={event => event.target === event.currentTarget && onClose()}><div className="login-card" role="dialog" aria-modal="true" aria-label="Admin sign in"><button className="modal-close" onClick={onClose} aria-label="Close admin sign in">{icon('close')}</button><p className="eyebrow">Fragrance Land / Private studio</p><h2>Welcome back.</h2><p className="login-copy">Sign in to manage your catalog and incoming orders.</p><form onSubmit={submit}><label>Email address<input required type="email" autoComplete="username" value={email} onChange={event => setEmail(event.target.value)} /></label><label>Password<input required type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} /></label>{error && <p className="field-error">{error}</p>}<button className="button button-dark full-button" disabled={busy} type="submit">{busy ? 'Signing in…' : 'Sign in'} {icon('arrow')}</button></form></div></div> }
 function Footer() { return <footer className="site-footer section-wrap"><img src={logo} alt="Fragrance Land" /><p>© 2026 Fragrance Land. Made for beautiful rituals.</p><span>Dubai · UAE</span></footer> }

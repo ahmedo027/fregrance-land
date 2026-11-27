@@ -24,7 +24,7 @@ Set `ADMIN_EMAIL`, `ADMIN_PASSWORD`, and `SESSION_SECRET` in `.env` before using
 
 ## Stripe payments
 
-The checkout uses Stripe Checkout in AED. Set `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` in the environment. In Stripe Dashboard, create a webhook endpoint at `/api/stripe/webhook` and listen for `checkout.session.completed` and `checkout.session.async_payment_succeeded`. Orders are created in the admin area only after Stripe confirms payment.
+Card payments use Stripe Checkout in AED. Set `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` in the environment. In Stripe Dashboard, create a webhook endpoint at `/api/stripe/webhook` and listen for `checkout.session.completed` and `checkout.session.async_payment_succeeded`. Card orders appear after Stripe confirms payment. International customers can also request a cash order. Open the order in the admin area and mark cash as received to deduct stock and include it in sales reports.
 
 ## Supabase persistence
 
@@ -48,6 +48,8 @@ Material costs are normalized to usable base units: liters become ml and kilogra
 for 1 liter becomes AED 1.80 per ml, while AED 1200 for 2 kg becomes AED 0.60 per gram. A production batch multiplies
 each recipe quantity by its material's base-unit cost, so 250 ml plus 100 g costs AED 510 before packaging. Materials
 categorized as packaging materials, bottles, or boxes are tracked separately as packaging cost.
+
+The selling price calculator uses product and packaging costs, the target profit margin, delivery charges, and the payment method. The report separates product sales from shipping collected. Website card orders use the actual AED processing fee when Stripe returns it. Other card fees are estimated using [Stripe UAE standard pricing](https://stripe.com/ae/pricing). Cash orders incur zero Stripe fees.
 
 To enable the OpenAI analysis assistant, add these server-only variables in Render. Never expose `OPENAI_API_KEY` to the browser, Vite variables, or GitHub.
 

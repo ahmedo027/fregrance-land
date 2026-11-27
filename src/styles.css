@@ -131,7 +131,50 @@ h1 em, h2 em { color: #bb7542; font-weight: 500; }
 .accounting-stack { display: grid; gap: 24px; }.accounting-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }.accounting-card { min-width: 0; padding: 19px; border: 1px solid #dfcbb7; background: #f5ede4; }.accounting-card span, .accounting-card small { display: block; color: var(--muted); font-size: 10px; }.accounting-card strong { display: block; margin: 11px 0 6px; font-family: 'Playfair Display', serif; font-size: 27px; font-weight: 500; overflow-wrap: anywhere; }.accounting-card small { line-height: 1.45; }
 .accounting-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start; }.accounting-panel { min-width: 0; padding: 25px; border: 1px solid var(--line); background: #f5ede4; }.accounting-panel-heading { display: flex; justify-content: space-between; align-items: start; gap: 15px; margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid #dfcbb7; }.accounting-panel-heading h2 { margin: 0; font-size: 25px; }.accounting-panel-heading > span { color: var(--muted); font-size: 10px; white-space: nowrap; }.accounting-note { color: var(--muted); font-size: 11px; line-height: 1.65; }.accounting-big-number { font-family: 'Playfair Display', serif; font-size: 36px; }.accounting-split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 20px 0; }.accounting-split > div { padding: 14px; border: 1px solid #dfcbb7; }.accounting-split span, .accounting-split small { display: block; color: var(--muted); font-size: 10px; }.accounting-split strong { display: block; margin: 8px 0 4px; font-family: 'Playfair Display', serif; font-size: 21px; font-weight: 500; }
 .accounting-table, .accounting-list { border-top: 1px solid var(--ink); }.accounting-table-row, .accounting-list-row { display: grid; grid-template-columns: 1fr auto auto; gap: 13px; align-items: center; padding: 14px 0; border-bottom: 1px solid #dfcbb7; }.accounting-table-row strong, .accounting-table-row small, .accounting-list-row strong, .accounting-list-row small { display: block; }.accounting-table-row > div strong, .accounting-list-row > div strong { font-family: 'Playfair Display', serif; font-size: 16px; font-weight: 500; }.accounting-table-row small, .accounting-list-row small { margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.45; }.accounting-table-row > span { color: var(--muted); font-size: 10px; white-space: nowrap; }.accounting-table-row > strong, .accounting-list-row > strong { font-size: 11px; white-space: nowrap; }.accounting-list-row .text-button { font-size: 10px; white-space: nowrap; }.accounting-empty { padding: 24px 0 8px; color: var(--muted); font-size: 11px; }.negative { color: #a24e4e; }.accounting-warning { display: block; color: #a24e4e; margin-top: 10px; font-size: 10px; }
+.accounting-price-result { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; margin: 8px 0 15px; }.accounting-price-result > div { padding: 13px; border: 1px solid #dfcbb7; background: rgba(255,255,255,.34); }.accounting-price-result span { display: block; color: var(--muted); font-size: 9px; }.accounting-price-result strong { display: block; margin-top: 7px; font-family: 'Playfair Display', serif; font-size: 18px; font-weight: 500; }
 .accounting-form label { margin-bottom: 14px; }.accounting-form input, .accounting-form select, .accounting-form textarea { display: block; box-sizing: border-box; width: 100%; min-height: 42px; margin-top: 6px; border: 1px solid #dbc8b4; background: rgba(255,255,255,.62); padding: 10px 11px; color: var(--ink); font: inherit; font-size: 11px; border-radius: 1px; }.accounting-form textarea { min-height: 74px; resize: vertical; }.accounting-form label small { display: block; margin-top: 5px; color: var(--muted); font-size: 9px; font-weight: 400; }.accounting-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }.accounting-form .full-button { width: 100%; margin-top: 5px; }.optional { color: var(--muted); font-size: 9px; font-weight: 400; }.recipe-heading { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin: 5px 0 9px; font-size: 11px; }.recipe-row { display: grid; grid-template-columns: 1.2fr 1fr 32px; gap: 7px; margin-bottom: 7px; }.recipe-row select, .recipe-row input { min-width: 0; margin: 0; }.recipe-row .icon-button { width: 32px; height: 42px; }
 .accounting-ai { background: #efe2d3; }.accounting-ai form { display: grid; grid-template-columns: 1fr auto; gap: 11px; align-items: end; }.accounting-ai textarea { min-height: 48px; box-sizing: border-box; width: 100%; border: 1px solid #dbc8b4; background: #fffaf4; padding: 10px; color: var(--ink); font: inherit; font-size: 11px; resize: vertical; }.accounting-ai-answer { margin-top: 16px; padding: 15px; border-left: 2px solid #b16f43; background: rgba(255,255,255,.42); }.accounting-ai-answer p { margin: 5px 0; color: #5c4a3c; font-size: 11px; line-height: 1.6; }.accounting-loading, .accounting-error, .accounting-success { padding: 16px; border: 1px solid #dfcbb7; background: #f5ede4; color: var(--muted); font-size: 12px; }.accounting-error { display: flex; align-items: center; gap: 14px; color: #8c4742; background: #f5e4df; border-color: #dfb9af; }.accounting-error .button { margin-left: auto; }.accounting-success { color: var(--green); background: #e5f0e4; border-color: #b9d2bb; margin-bottom: 18px; }
 @media (max-width: 850px) { .accounting-header { align-items: start; flex-direction: column; }.accounting-header .button { width: 100%; }.accounting-datebar > div { flex-basis: 100%; }.accounting-datebar input { width: 100%; box-sizing: border-box; }.accounting-grid { grid-template-columns: 1fr; }.accounting-cards { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 500px) { .accounting-page { padding-top: 38px; }.accounting-cards { grid-template-columns: 1fr; }.accounting-panel { padding: 18px; }.accounting-datebar { display: grid; grid-template-columns: 1fr 1fr; }.accounting-datebar > div, .accounting-datebar .text-button { grid-column: 1 / -1; }.accounting-datebar label input { width: 100%; }.accounting-form-row, .accounting-ai form { grid-template-columns: 1fr; gap: 0; }.accounting-ai form .button { width: 100%; margin-top: 9px; }.accounting-table-row, .accounting-list-row { grid-template-columns: 1fr auto; gap: 9px; }.accounting-table-row > span, .accounting-list-row > strong { grid-column: 2; grid-row: 1; }.accounting-table-row > strong { grid-column: 1; grid-row: 2; }.accounting-list-row .text-button { grid-column: 2; }.accounting-split { grid-template-columns: 1fr; }.recipe-row { grid-template-columns: 1fr 1fr 32px; } }
+@media (max-width: 500px) { .accounting-price-result { grid-template-columns: 1fr 1fr; } }
+
+:focus-visible { outline: 2px solid #9a542e; outline-offset: 3px; }
+button:disabled { cursor: not-allowed; opacity: .58; }
+.product-dialog { width: min(880px, calc(100% - 32px)); max-width: none; max-height: none; padding: 0; border: 0; background: transparent; color: var(--ink); }
+.product-dialog::backdrop { background: rgb(34 24 17 / .64); }
+.product-dialog .product-modal { width: 100%; }
+.gallery-dots button { width: 22px; height: 22px; border: 1px solid var(--ink); border-radius: 50%; background: var(--paper); }
+.gallery-dots button[aria-pressed="true"] { background: var(--ink); }
+.checkout-fields { padding: 0; border: 0; min-width: 0; margin: 0 0 16px; }
+.checkout-card .checkout-summary { padding: 14px 0; border-top: 1px solid var(--line); }
+.checkout-card .field-error { margin: 8px 0 14px; }
+.order-cash-action { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 20px; }
+.order-cash-action p { color: var(--muted); font-size: 13px; }
+.accounting-nav button { min-height: 44px; font-size: 12px; }
+.accounting-form input, .accounting-form select, .accounting-form textarea { font-size: 14px; }
+.accounting-price-result .pricing-highlight { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.pricing-highlight span { color: var(--paper); }
+.accounting-form .pricing-checkbox { display: flex; gap: 8px; align-items: center; }
+.pricing-checkbox input[type="checkbox"] { width: 18px; height: 18px; min-height: 0; margin: 0; }
+.accounting-regions { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 12px; }
+.accounting-regions > div { border: 1px solid var(--line); padding: 14px; }
+.accounting-regions h3, .accounting-regions dl { margin: 0; }
+.accounting-regions dl > div { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding-top: 8px; font-size: 12px; }
+.accounting-regions dd { margin: 0; font-weight: 600; }
+.accounting-error, .accounting-success { margin-bottom: 16px; }
+@media (max-width: 600px) {
+  .accounting-nav { flex-wrap: wrap; }
+  .order-cash-action { align-items: stretch; flex-direction: column; }
+  .checkout-card input, .checkout-card select, .checkout-card textarea,
+  .accounting-form input, .accounting-form select, .accounting-form textarea { font-size: 16px; }
+}
+@media (max-width: 500px) {
+  .product-dialog { width: 100%; margin: auto 0 0; }
+  .product-dialog .product-modal { max-height: 94dvh; }
+  .accounting-datebar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .accounting-list-row > div { min-width: 0; overflow-wrap: anywhere; }
+  .accounting-price-result > div { min-width: 0; overflow-wrap: anywhere; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+}
