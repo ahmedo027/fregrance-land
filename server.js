@@ -73,6 +73,7 @@ function sizeKey(size) { const normalized = normalizeSizeOption(size); return `$
 function sizeLabel(size) { const normalized = normalizeSizeOption(size); return `${normalized.value} ${normalized.unit}` }
 function normalizeDiscount(value) { const discount = Number(value || 0); return Number.isFinite(discount) ? Math.min(99, Math.max(0, Math.round(discount))) : 0 }
 function productPrice(product) { return Number((Number(product.price) * (1 - normalizeDiscount(product.discountPercent) / 100)).toFixed(2)) }
+function shippingFeeForCountry(country) { return country === 'AE' ? 25 : 80 }
 
 function slugify(value) {
   return String(value || 'category').trim().toLowerCase().normalize('NFKD').replace(/[^\p{L}\p{N}\s-]/gu, '').replace(/[\s_-]+/g, '-').replace(/^-+|-+$/g, '') || `category-${Date.now()}`
@@ -186,9 +187,10 @@ function normalizeCustomer(input) {
     email: String(input?.email || '').trim().toLowerCase().slice(0, 254),
     phone: String(input?.phone || '').trim().slice(0, 40),
     address: String(input?.address || '').trim().slice(0, 240),
+    country: String(input?.country || '').trim(),
     notes: String(input?.notes || '').trim().slice(0, 1000),
   }
-  if (!customer.name || !customer.phone || (customer.email && !/^\S+@\S+\.\S+$/.test(customer.email))) throw new Error('Complete valid customer details before checkout.')
+  if (!customer.name || !customer.phone || !customer.address || !['AE', 'OTHER'].includes(customer.country) || (customer.email && !/^\S+@\S+\.\S+$/.test(customer.email))) throw new Error('Complete valid customer details before checkout.')
   return customer
 }
 function orderLinesForStore(store, inputLines) {
@@ -275,7 +277,7 @@ async function createPaidOrder(store, draft, sessionId) {
     const product = store.products.find(item => item.id === line.productId)
     if (product) product.stock = Math.max(0, product.stock - line.quantity)
   }
-  const order = { id: `FL-${Date.now().toString().slice(-8)}`, date: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }), customer: draft.customer, lines: draft.lines, total: draft.total, status: 'Pending', paymentStatus: 'Paid', paymentSessionId: sessionId }
+  const order = { id: `FL-${Date.now().toString().slice(-8)}`, date: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }), customer: draft.customer, lines: draft.lines, shippingFee: draft.shippingFee, total: draft.total, status: 'Pending', paymentStatus: 'Paid', paymentSessionId: sessionId }
   store.orders.unshift(order)
   store.pendingCheckouts = store.pendingCheckouts.filter(item => item.id !== draft.id)
   await writeStore(store)
@@ -370,14 +372,15 @@ const server = http.createServer(async (req, res) => {
       const input = await body(req)
       const customer = normalizeCustomer(input.customer)
       const lines = orderLinesForStore(store, input.lines)
-      const total = lines.reduce((sum, line) => sum + line.price * line.quantity, 0)
-      const draft = { id: crypto.randomUUID(), customer, lines, total, createdAt: new Date().toISOString() }
+      const shippingFee = shippingFeeForCountry(customer.country)
+      const total = lines.reduce((sum, line) => sum + line.price * line.quantity, 0) + shippingFee
+      const draft = { id: crypto.randomUUID(), customer, lines, shippingFee, total, createdAt: new Date().toISOString() }
       store.pendingCheckouts.unshift(draft)
       await writeStore(store)
       try {
         const session = await stripe.checkout.sessions.create({
           mode: 'payment',
-          line_items: lines.map(line => { const product = store.products.find(item => item.id === line.productId); return { price_data: { currency: 'aed', product_data: { name: `${product.name} · ${sizeLabel(line.size)}`, description: product.subtitle }, unit_amount: Math.round(line.price * 100) }, quantity: line.quantity } }),
+          line_items: [...lines.map(line => { const product = store.products.find(item => item.id === line.productId); return { price_data: { currency: 'aed', product_data: { name: `${product.name} · ${sizeLabel(line.size)}`, description: product.subtitle }, unit_amount: Math.round(line.price * 100) }, quantity: line.quantity } }), { price_data: { currency: 'aed', product_data: { name: customer.country === 'AE' ? 'Delivery · UAE' : 'Delivery · Outside UAE', description: 'Shipping cost' }, unit_amount: Math.round(shippingFee * 100) }, quantity: 1 }],
           customer_email: customer.email || undefined,
           metadata: { draftId: draft.id },
           success_url: `${checkoutOrigin(req)}/?payment=success&session_id={CHECKOUT_SESSION_ID}`,
