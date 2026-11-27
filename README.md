@@ -38,6 +38,19 @@ SUPABASE_SECRET_KEY=your-server-only-supabase-secret-key
 SUPABASE_STORAGE_BUCKET=fragrance-products
 ```
 
+## AI accountant
+
+The private `/accountant-test` page is available after the admin signs in through `/admin`. The website calculates the accounting numbers on the server from paid website orders, product creation costs, packaging costs, and outside sales entered by the admin. Outside sales are saved in the same Supabase-backed store.
+
+To enable the OpenAI analysis assistant, add these server-only variables in Render. Never expose `OPENAI_API_KEY` to the browser, Vite variables, or GitHub.
+
+```text
+OPENAI_API_KEY=your-openai-api-key
+OPENAI_MODEL=gpt-5-mini
+```
+
+The arithmetic remains server-calculated; OpenAI receives the financial summary without customer names, emails, phone numbers, or addresses and provides explanations and business observations.
+
 ## Production direction
 
 The app is structured as a single Node service so it can be pushed to GitHub and deployed to Render. Before going live:
