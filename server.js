@@ -5,6 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Stripe from 'stripe'
 import { createClient } from '@supabase/supabase-js'
+import { createAccountantService } from './accountant-service.js'
 
 const root = path.dirname(fileURLToPath(import.meta.url))
 const publicDir = path.join(root, 'public')
@@ -197,6 +198,35 @@ async function askAccountant(question, summary) {
   return answer
 }
 
+function parseAiJson(value) {
+  const raw = String(value || '').trim().replace(/^```json\s*/i, '').replace(/```$/i, '').trim()
+  try { return JSON.parse(raw) } catch {
+    const start = raw.indexOf('{'); const end = raw.lastIndexOf('}')
+    if (start >= 0 && end > start) return JSON.parse(raw.slice(start, end + 1))
+    throw new Error('The AI action draft was not valid JSON.')
+  }
+}
+
+async function prepareAccountantAction(question, summary) {
+  if (!openAiApiKey) throw new Error('OpenAI is not configured. Add OPENAI_API_KEY in Render environment variables.')
+  const response = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${openAiApiKey}` },
+    body: JSON.stringify({
+      model: openAiModel,
+      instructions: 'You are a bilingual Arabic/English financial assistant for a UAE fragrance shop. Never execute actions. Return only JSON with keys answer (string) and action (null or an object). Allowed action types are expense, outside_sale, material_purchase, production_batch. If the request is not an explicit record/create request, action must be null. Use only IDs and values supplied in the context; never invent missing IDs, quantities, prices or dates. If required details are missing, explain them in answer and return action null. All currency is AED.',
+      input: `Owner request: ${String(question || '').trim().slice(0, 2000)}\n\nAvailable products and materials plus financial summary:\n${JSON.stringify({ products: summary.products.map(item => ({ id: item.id, name: item.name })), materials: summary.materials.map(item => ({ id: item.id, name: item.name, unit: item.unit, quantity: item.quantity })), summary })}`,
+    }),
+  })
+  const payload = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(payload?.error?.message || 'OpenAI request failed.')
+  const parsed = parseAiJson(openAiText(payload))
+  if (parsed.action && !['expense', 'outside_sale', 'material_purchase', 'production_batch'].includes(parsed.action.type)) parsed.action = null
+  return { answer: textValue(parsed.answer || 'Review the draft before confirming.', 4000), action: parsed.action || null, model: openAiModel }
+}
+
+function textValue(value, max = 2000) { return String(value || '').trim().slice(0, max) }
+
 function slugify(value) {
   return String(value || 'category').trim().toLowerCase().normalize('NFKD').replace(/[^\p{L}\p{N}\s-]/gu, '').replace(/[\s_-]+/g, '-').replace(/^-+|-+$/g, '') || `category-${Date.now()}`
 }
@@ -275,6 +305,7 @@ async function persistStore(store) {
 }
 
 function writeStore(store) { return persistStore(store) }
+const accountant = createAccountantService({ supabase, getStore: readStore, writeStore, getProducts: () => readStore().products, auditActor: adminEmail })
 function json(res, status, payload) { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(payload)) }
 function noContent(res) { res.writeHead(204); res.end() }
 function parseCookies(req) { return Object.fromEntries((req.headers.cookie || '').split(';').filter(Boolean).map(value => { const index = value.indexOf('='); return [value.slice(0, index).trim(), decodeURIComponent(value.slice(index + 1))] })) }
@@ -293,6 +324,7 @@ function currentAdmin(req) {
 }
 function requireAdmin(req, res) { const admin = currentAdmin(req); if (!admin) { json(res, 401, { error: 'Admin authentication required.' }); return null } return admin }
 const loginAttempts = new Map()
+const preparedAiActions = new Map()
 function clientAddress(req) { return String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim() }
 function allowLoginAttempt(req) {
   const key = clientAddress(req)
@@ -395,16 +427,24 @@ function checkoutOrigin(req) {
   const host = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${port}`
   return `${protocol}://${host}`
 }
-async function createPaidOrder(store, draft, sessionId) {
-  if (store.orders.some(order => order.paymentSessionId === sessionId)) return null
+async function recordWebsiteOrderMovements(order) {
+  for (const [index, line] of (order.lines || []).entries()) {
+    await accountant.recordMovement({ idempotencyKey: `website-order:${order.id}:${index}`, movementType: 'website_order', referenceId: order.id, inventoryKey: `product:${line.productId}`, productId: line.productId, sizeValue: line.size.value, sizeUnit: line.size.unit, quantityDelta: -line.quantity, unit: 'pieces', unitCost: 0 }).catch(error => console.error('Website inventory movement failed:', error.message))
+  }
+}
+
+async function createPaidOrder(store, draft, sessionId, stripeFee = 0) {
+  const existing = store.orders.find(order => order.paymentSessionId === sessionId)
+  if (existing) { await recordWebsiteOrderMovements(existing); return null }
   for (const line of draft.lines) {
     const product = store.products.find(item => item.id === line.productId)
     if (product) product.stock = Math.max(0, product.stock - line.quantity)
   }
-  const order = { id: `FL-${Date.now().toString().slice(-8)}`, date: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }), customer: draft.customer, lines: draft.lines, shippingFee: draft.shippingFee, total: draft.total, status: 'Pending', paymentStatus: 'Paid', paymentSessionId: sessionId }
+  const order = { id: `FL-${Date.now().toString().slice(-8)}`, date: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }), createdAt: new Date().toISOString(), customer: draft.customer, lines: draft.lines, shippingFee: draft.shippingFee, stripeFee: normalizeMoney(stripeFee), total: draft.total, status: 'Pending', paymentStatus: 'Paid', paymentSessionId: sessionId }
   store.orders.unshift(order)
   store.pendingCheckouts = store.pendingCheckouts.filter(item => item.id !== draft.id)
   await writeStore(store)
+  await recordWebsiteOrderMovements(order)
   return order
 }
 async function completeStripeSession(session) {
@@ -415,7 +455,16 @@ async function completeStripeSession(session) {
     console.warn('Stripe payment received without a matching checkout draft:', session.id)
     return null
   }
-  return createPaidOrder(store, draft, session.id)
+  let stripeFee = 0
+  try {
+    const paymentIntentId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id
+    if (stripe && paymentIntentId) {
+      const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId, { expand: ['latest_charge.balance_transaction'] })
+      const transaction = paymentIntent.latest_charge?.balance_transaction
+      stripeFee = typeof transaction === 'object' ? Number(transaction.fee || 0) / 100 : 0
+    }
+  } catch (error) { console.warn('Stripe fee lookup unavailable:', error?.message || error) }
+  return createPaidOrder(store, draft, session.id, stripeFee)
 }
 function serveFile(req, res, filePath) {
   if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) { res.writeHead(404); res.end('Not found'); return }
@@ -464,16 +513,80 @@ const server = http.createServer(async (req, res) => {
     const store = readStore()
     if (route === '/api/accountant/summary' && req.method === 'GET') {
       if (!requireAdmin(req, res)) return
-      return json(res, 200, calculateAccountantSummary(store))
+      const from = requestUrl.searchParams.get('from') || ''
+      const to = requestUrl.searchParams.get('to') || ''
+      return json(res, 200, await accountant.summary({ from, to }))
     }
     if (route === '/api/accountant/ask' && req.method === 'POST') {
       if (!requireAdmin(req, res)) return
       const input = await body(req)
       const question = String(input?.question || '').trim()
       if (!question) return json(res, 400, { error: 'Ask a question about the accountant summary.' })
-      const summary = calculateAccountantSummary(store)
+      const summary = await accountant.summary({ from: input?.from || '', to: input?.to || '' })
       const answer = await askAccountant(question, summary)
       return json(res, 200, { answer, model: openAiModel })
+    }
+    if (route === '/api/accountant/ai/prepare' && req.method === 'POST') {
+      const admin = requireAdmin(req, res); if (!admin) return
+      const input = await body(req)
+      const question = String(input?.question || '').trim()
+      if (!question) return json(res, 400, { error: 'Describe the financial action you want to prepare.' })
+      const summary = await accountant.summary({ from: input?.from || '', to: input?.to || '' })
+      const prepared = await prepareAccountantAction(question, summary)
+      if (!prepared.action) return json(res, 200, prepared)
+      const confirmationToken = crypto.randomUUID()
+      preparedAiActions.set(confirmationToken, { admin: admin.email, action: prepared.action, expiresAt: Date.now() + 10 * 60 * 1000 })
+      return json(res, 200, { ...prepared, confirmationToken })
+    }
+    if (route === '/api/accountant/ai/execute' && req.method === 'POST') {
+      const admin = requireAdmin(req, res); if (!admin) return
+      const input = await body(req)
+      const prepared = preparedAiActions.get(String(input?.confirmationToken || ''))
+      if (!prepared || prepared.expiresAt < Date.now() || prepared.admin !== admin.email) return json(res, 409, { error: 'This AI action draft expired or was not confirmed through the accountant page. Prepare it again.' })
+      const action = prepared.action
+      if (!action || !['expense', 'outside_sale', 'material_purchase', 'production_batch'].includes(action.type)) return json(res, 400, { error: 'Invalid accountant action.' })
+      let result
+      if (action.type === 'expense') result = await accountant.createExpense(action.payload || {})
+      if (action.type === 'outside_sale') result = await accountant.createOutsideSale({ ...(action.payload || {}), confirmed: true, status: 'Confirmed' })
+      if (action.type === 'material_purchase') result = await accountant.createMaterial(action.payload || {})
+      if (action.type === 'production_batch') result = await accountant.createProductionBatch({ ...(action.payload || {}), confirmed: true })
+      preparedAiActions.delete(String(input.confirmationToken))
+      return json(res, 201, { ok: true, action: action.type, result })
+    }
+    if (route === '/api/accountant/expenses' && req.method === 'GET') { if (!requireAdmin(req, res)) return; return json(res, 200, await accountant.expenses()) }
+    if (route === '/api/accountant/expenses' && req.method === 'POST') { if (!requireAdmin(req, res)) return; return json(res, 201, await accountant.createExpense(await body(req))) }
+    const accountantExpenseMatch = route.match(/^\/api\/accountant\/expenses\/([^/]+)$/)
+    if (accountantExpenseMatch && req.method === 'PATCH') { if (!requireAdmin(req, res)) return; return json(res, 200, await accountant.updateExpense(decodeURIComponent(accountantExpenseMatch[1]), await body(req))) }
+    if (accountantExpenseMatch && req.method === 'DELETE') { if (!requireAdmin(req, res)) return; await accountant.deleteExpense(decodeURIComponent(accountantExpenseMatch[1])); return noContent(res) }
+    if (route === '/api/accountant/materials' && req.method === 'GET') { if (!requireAdmin(req, res)) return; return json(res, 200, await accountant.materials()) }
+    if (route === '/api/accountant/materials' && req.method === 'POST') { if (!requireAdmin(req, res)) return; return json(res, 201, await accountant.createMaterial(await body(req))) }
+    const accountantMaterialMatch = route.match(/^\/api\/accountant\/materials\/([^/]+)$/)
+    if (accountantMaterialMatch && req.method === 'PATCH') { if (!requireAdmin(req, res)) return; return json(res, 200, await accountant.updateMaterial(decodeURIComponent(accountantMaterialMatch[1]), await body(req))) }
+    if (accountantMaterialMatch && req.method === 'DELETE') { if (!requireAdmin(req, res)) return; await accountant.deleteMaterial(decodeURIComponent(accountantMaterialMatch[1])); return noContent(res) }
+    if (route === '/api/accountant/outside-sales' || route === '/api/accountant/sales') {
+      if (!requireAdmin(req, res)) return
+      if (req.method === 'GET') return json(res, 200, await accountant.outsideSales())
+      if (req.method === 'POST') {
+        const input = await body(req)
+        return json(res, 201, await accountant.createOutsideSale({ ...input, saleDate: input.saleDate || input.date, confirmed: input.confirmed !== false, status: input.status || 'Confirmed' }))
+      }
+    }
+    const accountantSaleMatch = route.match(/^\/api\/accountant\/(?:outside-sales|sales)\/([^/]+)$/)
+    if (accountantSaleMatch && req.method === 'PATCH') { if (!requireAdmin(req, res)) return; return json(res, 200, await accountant.updateOutsideSale(decodeURIComponent(accountantSaleMatch[1]), await body(req))) }
+    if (accountantSaleMatch && req.method === 'DELETE') { if (!requireAdmin(req, res)) return; await accountant.deleteOutsideSale(decodeURIComponent(accountantSaleMatch[1])); return noContent(res) }
+    if (route === '/api/accountant/production/batches' && req.method === 'GET') { if (!requireAdmin(req, res)) return; return json(res, 200, await accountant.batches()) }
+    if (route === '/api/accountant/production/batches' && req.method === 'POST') { if (!requireAdmin(req, res)) return; return json(res, 201, await accountant.createProductionBatch(await body(req))) }
+    if (route === '/api/accountant/inventory' && req.method === 'GET') { if (!requireAdmin(req, res)) return; return json(res, 200, await accountant.getInventory()) }
+    if (route === '/api/accountant/costs' && req.method === 'PUT') {
+      if (!requireAdmin(req, res)) return
+      const input = await body(req)
+      const productId = decodeURIComponent(String(input?.productId || ''))
+      const product = store.products.find(item => item.id === productId)
+      if (!product) return json(res, 404, { error: 'Product not found.' })
+      product.productionCost = normalizeMoney(input?.productionCost)
+      product.packagingCost = normalizeMoney(input?.packagingCost)
+      await writeStore(store)
+      return json(res, 200, { id: product.id, productionCost: product.productionCost, packagingCost: product.packagingCost })
     }
     const accountantCostMatch = route.match(/^\/api\/accountant\/costs\/([^/]+)$/)
     if (accountantCostMatch && req.method === 'PUT') {
@@ -486,23 +599,6 @@ const server = http.createServer(async (req, res) => {
       product.packagingCost = normalizeMoney(input?.packagingCost)
       await writeStore(store)
       return json(res, 200, { id: product.id, productionCost: product.productionCost, packagingCost: product.packagingCost })
-    }
-    if (route === '/api/accountant/sales' && req.method === 'POST') {
-      if (!requireAdmin(req, res)) return
-      const sale = normalizeExternalSale(await body(req), store)
-      store.externalSales.unshift(sale)
-      await writeStore(store)
-      return json(res, 201, sale)
-    }
-    const accountantSaleMatch = route.match(/^\/api\/accountant\/sales\/([^/]+)$/)
-    if (accountantSaleMatch && req.method === 'DELETE') {
-      if (!requireAdmin(req, res)) return
-      const saleId = decodeURIComponent(accountantSaleMatch[1])
-      const exists = store.externalSales.some(sale => sale.id === saleId)
-      if (!exists) return json(res, 404, { error: 'Outside sale not found.' })
-      store.externalSales = store.externalSales.filter(sale => sale.id !== saleId)
-      await writeStore(store)
-      return noContent(res)
     }
     if (route === '/api/categories' && req.method === 'GET') return json(res, 200, store.categories)
     if (route === '/api/categories/all' && req.method === 'GET') { if (!requireAdmin(req, res)) return; return json(res, 200, store.categories) }
