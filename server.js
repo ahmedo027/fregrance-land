@@ -19,6 +19,8 @@ const adminPassword = process.env.ADMIN_PASSWORD || 'admin123'
 const sessionSecret = process.env.SESSION_SECRET || 'fragrance-land-local-secret-change-me'
 const stripeSecretKey = process.env.STRIPE_SECRET_KEY || ''
 const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET || ''
+const openAiApiKey = String(process.env.OPENAI_API_KEY || '').trim()
+const openAiModel = String(process.env.OPENAI_MODEL || 'gpt-5-mini').trim()
 const isProduction = process.env.NODE_ENV === 'production'
 const stripe = stripeSecretKey ? new Stripe(stripeSecretKey) : null
 const supabaseUrl = String(process.env.SUPABASE_URL || '').trim().replace(/\/+$/, '')
@@ -55,6 +57,7 @@ function initialStore() {
     products: [],
     orders: [],
     pendingCheckouts: [],
+    externalSales: [],
   }
 }
 
@@ -72,8 +75,127 @@ function normalizeSizes(input, fallback = [50, 75, 100]) {
 function sizeKey(size) { const normalized = normalizeSizeOption(size); return `${normalized.value}-${normalized.unit}` }
 function sizeLabel(size) { const normalized = normalizeSizeOption(size); return `${normalized.value} ${normalized.unit}` }
 function normalizeDiscount(value) { const discount = Number(value || 0); return Number.isFinite(discount) ? Math.min(99, Math.max(0, Math.round(discount))) : 0 }
+function normalizeMoney(value) { const amount = Number(value || 0); return Number.isFinite(amount) && amount >= 0 ? Number(amount.toFixed(2)) : 0 }
 function productPrice(product) { return Number((Number(product.price) * (1 - normalizeDiscount(product.discountPercent) / 100)).toFixed(2)) }
 function shippingFeeForCountry(country) { return country === 'AE' ? 25 : 80 }
+function productUnitCost(product) { return normalizeMoney(product.productionCost) + normalizeMoney(product.packagingCost) }
+
+function normalizeExternalSale(input, store) {
+  const productId = String(input?.productId || '').trim()
+  const product = store.products.find(item => item.id === productId)
+  if (!product) throw new Error('Choose a valid product for the outside sale.')
+  const quantity = Number(input?.quantity)
+  const unitPrice = Number(input?.unitPrice)
+  const date = String(input?.date || new Date().toISOString().slice(0, 10)).trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(`${date}T00:00:00Z`))) throw new Error('Sale date is invalid.')
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100000) throw new Error('Sale quantity must be a whole number from 1 upward.')
+  if (!Number.isFinite(unitPrice) || unitPrice < 0 || unitPrice > 1000000) throw new Error('Sale price must be zero or greater.')
+  const size = normalizeSizeOption(input?.size || product.sizes[0])
+  if (!product.sizes.some(option => sizeKey(option) === sizeKey(size))) throw new Error('Choose a valid product size.')
+  return {
+    id: String(input?.id || crypto.randomUUID()),
+    date,
+    productId,
+    size,
+    quantity,
+    unitPrice: normalizeMoney(unitPrice),
+    total: normalizeMoney(unitPrice * quantity),
+    notes: String(input?.notes || '').trim().slice(0, 500),
+  }
+}
+
+function calculateAccountantSummary(store) {
+  const products = store.products.map(product => ({
+    id: product.id,
+    name: product.name,
+    image: product.images?.[0] || '',
+    productionCost: normalizeMoney(product.productionCost),
+    packagingCost: normalizeMoney(product.packagingCost),
+    unitCost: normalizeMoney(productUnitCost(product)),
+    websiteUnits: 0,
+    externalUnits: 0,
+    websiteRevenue: 0,
+    externalRevenue: 0,
+  }))
+  const byId = new Map(products.map(product => [product.id, product]))
+  let websiteOrderCount = 0
+  let websiteProductRevenue = 0
+  let shippingRevenue = 0
+  for (const order of store.orders) {
+    if (order.status === 'Cancelled' || (order.paymentStatus && order.paymentStatus !== 'Paid')) continue
+    websiteOrderCount += 1
+    shippingRevenue += normalizeMoney(order.shippingFee)
+    for (const line of Array.isArray(order.lines) ? order.lines : []) {
+      const product = byId.get(line.productId)
+      if (!product) continue
+      const quantity = Number(line.quantity) || 0
+      const revenue = normalizeMoney((Number(line.price) || 0) * quantity)
+      product.websiteUnits += quantity
+      product.websiteRevenue += revenue
+      websiteProductRevenue += revenue
+    }
+  }
+  const externalSales = (Array.isArray(store.externalSales) ? store.externalSales : []).map(sale => {
+    const product = byId.get(sale.productId)
+    return {
+      ...sale,
+      quantity: Number(sale.quantity) || 0,
+      unitPrice: normalizeMoney(sale.unitPrice),
+      total: normalizeMoney(sale.total ?? (Number(sale.unitPrice) || 0) * (Number(sale.quantity) || 0)),
+      productName: product?.name || 'Deleted product',
+    }
+  })
+  let externalProductRevenue = 0
+  let externalUnits = 0
+  for (const sale of externalSales) {
+    const product = byId.get(sale.productId)
+    if (!product) continue
+    product.externalUnits += sale.quantity
+    product.externalRevenue += sale.total
+    externalProductRevenue += sale.total
+    externalUnits += sale.quantity
+  }
+  const productRows = products.map(product => {
+    const totalUnits = product.websiteUnits + product.externalUnits
+    const totalRevenue = normalizeMoney(product.websiteRevenue + product.externalRevenue)
+    const estimatedCost = normalizeMoney(totalUnits * product.unitCost)
+    return { ...product, totalUnits, totalRevenue, estimatedCost, estimatedProfit: normalizeMoney(totalRevenue - estimatedCost) }
+  })
+  const collectedRevenue = normalizeMoney(websiteProductRevenue + shippingRevenue + externalProductRevenue)
+  const estimatedCost = normalizeMoney(productRows.reduce((sum, product) => sum + product.estimatedCost, 0))
+  return {
+    currency: 'AED',
+    generatedAt: new Date().toISOString(),
+    website: { orderCount: websiteOrderCount, units: productRows.reduce((sum, product) => sum + product.websiteUnits, 0), productRevenue: normalizeMoney(websiteProductRevenue), shippingRevenue, collectedRevenue: normalizeMoney(websiteProductRevenue + shippingRevenue) },
+    external: { saleCount: externalSales.length, units: externalUnits, productRevenue: normalizeMoney(externalProductRevenue) },
+    totals: { units: productRows.reduce((sum, product) => sum + product.totalUnits, 0), productRevenue: normalizeMoney(websiteProductRevenue + externalProductRevenue), shippingRevenue, collectedRevenue, estimatedCost, estimatedProfit: normalizeMoney(websiteProductRevenue + externalProductRevenue - estimatedCost) },
+    products: productRows,
+    externalSales,
+  }
+}
+
+function openAiText(payload) {
+  if (typeof payload?.output_text === 'string' && payload.output_text.trim()) return payload.output_text.trim()
+  return (payload?.output || []).flatMap(item => item.content || []).map(item => item.text || '').filter(Boolean).join('\n').trim()
+}
+
+async function askAccountant(question, summary) {
+  if (!openAiApiKey) throw new Error('OpenAI is not configured. Add OPENAI_API_KEY in Render environment variables.')
+  const response = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${openAiApiKey}` },
+    body: JSON.stringify({
+      model: openAiModel,
+      instructions: 'You are the financial assistant for a small UAE fragrance and incense shop. Analyze only the supplied summary. Do not invent numbers. Use AED, explain that profit is estimated from entered product and packaging costs, and keep the answer concise with practical observations. Do not mention or request customer personal data.',
+      input: `The shop owner asks: ${String(question || '').trim().slice(0, 2000)}\n\nAccountant summary:\n${JSON.stringify(summary)}`,
+    }),
+  })
+  const payload = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(payload?.error?.message || 'OpenAI request failed.')
+  const answer = openAiText(payload)
+  if (!answer) throw new Error('OpenAI returned an empty answer.')
+  return answer
+}
 
 function slugify(value) {
   return String(value || 'category').trim().toLowerCase().normalize('NFKD').replace(/[^\p{L}\p{N}\s-]/gu, '').replace(/[\s_-]+/g, '-').replace(/^-+|-+$/g, '') || `category-${Date.now()}`
@@ -100,9 +222,10 @@ function migrateStore(store) {
     product.category = custom.id
   }
   store.categories = categories.map(category => normalizeCategory(category))
-  store.products = Array.isArray(store.products) ? store.products.filter(product => !demoProductIds.has(product.id)).map(product => ({ ...product, sizes: normalizeSizes(product.sizes), discountPercent: normalizeDiscount(product.discountPercent) })) : []
+  store.products = Array.isArray(store.products) ? store.products.filter(product => !demoProductIds.has(product.id)).map(product => ({ ...product, sizes: normalizeSizes(product.sizes), discountPercent: normalizeDiscount(product.discountPercent), productionCost: normalizeMoney(product.productionCost), packagingCost: normalizeMoney(product.packagingCost) })) : []
   store.orders = Array.isArray(store.orders) ? store.orders.map(order => ({ ...order, lines: Array.isArray(order.lines) ? order.lines.map(line => ({ ...line, size: normalizeSizeOption(line.size) })) : [] })) : []
   store.pendingCheckouts = Array.isArray(store.pendingCheckouts) ? store.pendingCheckouts : []
+  store.externalSales = Array.isArray(store.externalSales) ? store.externalSales : []
   return store
 }
 
@@ -264,6 +387,7 @@ async function normalizeProduct(input, existing = {}, categories = []) {
     id: existing.id || input.id || `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}-${Date.now()}`,
     name, subtitle, description, price, stock, notes: Array.isArray(input.notes) ? input.notes.map(note => String(note).trim().slice(0, 80)).filter(Boolean).slice(0, 20) : [],
     category, sizes, discountPercent, images: [image, image], active: input.active !== false,
+    productionCost: normalizeMoney(input.productionCost ?? existing.productionCost), packagingCost: normalizeMoney(input.packagingCost ?? existing.packagingCost),
   }
 }
 function checkoutOrigin(req) {
@@ -338,6 +462,48 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, created: Boolean(order) })
     }
     const store = readStore()
+    if (route === '/api/accountant/summary' && req.method === 'GET') {
+      if (!requireAdmin(req, res)) return
+      return json(res, 200, calculateAccountantSummary(store))
+    }
+    if (route === '/api/accountant/ask' && req.method === 'POST') {
+      if (!requireAdmin(req, res)) return
+      const input = await body(req)
+      const question = String(input?.question || '').trim()
+      if (!question) return json(res, 400, { error: 'Ask a question about the accountant summary.' })
+      const summary = calculateAccountantSummary(store)
+      const answer = await askAccountant(question, summary)
+      return json(res, 200, { answer, model: openAiModel })
+    }
+    const accountantCostMatch = route.match(/^\/api\/accountant\/costs\/([^/]+)$/)
+    if (accountantCostMatch && req.method === 'PUT') {
+      if (!requireAdmin(req, res)) return
+      const productId = decodeURIComponent(accountantCostMatch[1])
+      const product = store.products.find(item => item.id === productId)
+      if (!product) return json(res, 404, { error: 'Product not found.' })
+      const input = await body(req)
+      product.productionCost = normalizeMoney(input?.productionCost)
+      product.packagingCost = normalizeMoney(input?.packagingCost)
+      await writeStore(store)
+      return json(res, 200, { id: product.id, productionCost: product.productionCost, packagingCost: product.packagingCost })
+    }
+    if (route === '/api/accountant/sales' && req.method === 'POST') {
+      if (!requireAdmin(req, res)) return
+      const sale = normalizeExternalSale(await body(req), store)
+      store.externalSales.unshift(sale)
+      await writeStore(store)
+      return json(res, 201, sale)
+    }
+    const accountantSaleMatch = route.match(/^\/api\/accountant\/sales\/([^/]+)$/)
+    if (accountantSaleMatch && req.method === 'DELETE') {
+      if (!requireAdmin(req, res)) return
+      const saleId = decodeURIComponent(accountantSaleMatch[1])
+      const exists = store.externalSales.some(sale => sale.id === saleId)
+      if (!exists) return json(res, 404, { error: 'Outside sale not found.' })
+      store.externalSales = store.externalSales.filter(sale => sale.id !== saleId)
+      await writeStore(store)
+      return noContent(res)
+    }
     if (route === '/api/categories' && req.method === 'GET') return json(res, 200, store.categories)
     if (route === '/api/categories/all' && req.method === 'GET') { if (!requireAdmin(req, res)) return; return json(res, 200, store.categories) }
     if (route === '/api/categories' && req.method === 'POST') {
