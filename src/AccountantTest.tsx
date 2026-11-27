@@ -1,47 +1,24 @@
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
-import type { Product, SizeOption } from './App'
+import type { Product } from './App'
 
-type AccountantProduct = {
-  id: string
-  name: string
-  image: string
-  productionCost: number
-  packagingCost: number
-  unitCost: number
-  websiteUnits: number
-  externalUnits: number
-  totalUnits: number
-  websiteRevenue: number
-  externalRevenue: number
-  totalRevenue: number
-  estimatedCost: number
-  estimatedProfit: number
-}
+type Tab = 'dashboard' | 'costs' | 'expenses' | 'materials' | 'production' | 'sales' | 'inventory'
+type Expense = { id: string; category: string; description: string; amount: number; transaction_date: string }
+type Material = { id: string; name: string; category: string; quantity: number; unit: string; purchase_price: number; cost_per_unit: number; supplier: string; purchase_date: string; low_stock_threshold: number }
+type Sale = { id: string; product_id: string; productName: string; size_value: number; size_unit: 'ml' | 'g'; quantity: number; unit_price: number; discount_percent: number; payment_method: string; sale_date: string; notes: string; total: number; status: string }
+type Batch = { id: string; product_id: string; size_value: number; size_unit: 'ml' | 'g'; quantity_produced: number; raw_material_cost: number; packaging_cost: number; production_cost: number; cost_per_finished_product: number; batch_date: string; notes: string; status: string }
+type InventoryItem = { inventoryType: string; id: string; name: string; quantity: number; unit: string; value: number; lowStock: boolean }
+type AccountantProduct = { id: string; name: string; image: string; productionCost: number; packagingCost: number; unitCost: number; websiteUnits: number; outsideUnits: number; totalUnits: number; websiteRevenue: number; outsideRevenue: number; totalRevenue: number; estimatedCost: number; estimatedProfit: number }
+type Summary = { currency: 'AED'; generatedAt: string; dateRange: { from: string | null; to: string | null }; dashboard: { totalRevenue: number; grossProfit: number; netProfit: number; totalExpenses: number; costOfGoodsSold: number; totalProductsSold: number; outsideSales: number; websiteSales: number; inventoryValue: number; stripeFees: number; breakEvenProgress: number }; breakEven: { fixedExpenses: number; contributionMargin: number; unitsNeeded: number; unitsSold: number }; website: { orderCount: number; units: number; productRevenue: number; shippingRevenue: number; collectedRevenue: number }; external: { saleCount: number; units: number; productRevenue: number }; products: AccountantProduct[]; expenses: Expense[]; materials: Material[]; outsideSales: Sale[]; batches: Batch[]; inventory: InventoryItem[] }
+type AiAction = { type: 'expense' | 'outside_sale' | 'material_purchase' | 'production_batch'; payload: Record<string, unknown> }
 
-type ExternalSale = {
-  id: string
-  date: string
-  productId: string
-  productName: string
-  size?: SizeOption
-  quantity: number
-  unitPrice: number
-  total: number
-  notes?: string
-}
+const expenseCategories = ['Raw Materials', 'Packaging', 'Shipping', 'Marketing', 'Advertising', 'Rent', 'Salaries', 'Subscriptions', 'Other Expenses']
+const materialCategories = ['Perfume oils', 'Oud oils', 'Alcohol', 'Musk', 'Bakhoor ingredients', 'Packaging materials', 'Bottles', 'Boxes', 'Other']
+const units = ['ml', 'liters', 'grams', 'kilograms', 'pieces']
+const paymentMethods = ['Cash', 'Card', 'Bank transfer', 'Other']
+const money = (value: number) => `AED ${Number(value || 0).toFixed(2)}`
+const today = () => new Date().toISOString().slice(0, 10)
+const dateMinus = (days: number) => { const date = new Date(); date.setDate(date.getDate() - days); return date.toISOString().slice(0, 10) }
 
-type Summary = {
-  currency: 'AED'
-  generatedAt: string
-  website: { orderCount: number; units: number; productRevenue: number; shippingRevenue: number; collectedRevenue: number }
-  external: { saleCount: number; units: number; productRevenue: number }
-  totals: { units: number; productRevenue: number; shippingRevenue: number; collectedRevenue: number; estimatedCost: number; estimatedProfit: number }
-  products: AccountantProduct[]
-  externalSales: ExternalSale[]
-}
-
-function money(value: number) { return `AED ${Number(value || 0).toFixed(2)}` }
-function today() { return new Date().toISOString().slice(0, 10) }
 async function request<T>(url: string, options: RequestInit = {}) {
   const response = await fetch(url, { credentials: 'include', ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } })
   const payload = await response.json().catch(() => ({}))
@@ -49,94 +26,135 @@ async function request<T>(url: string, options: RequestInit = {}) {
   return payload as T
 }
 
+function periodDates(period: string, customFrom: string, customTo: string) {
+  if (period === 'custom') return { from: customFrom, to: customTo }
+  if (period === 'today') return { from: today(), to: today() }
+  if (period === 'week') return { from: dateMinus(6), to: today() }
+  if (period === 'year') return { from: `${new Date().getFullYear()}-01-01`, to: today() }
+  return { from: `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-01`, to: today() }
+}
+
 export default function AccountantTest({ products }: { products: Product[] }) {
+  const [tab, setTab] = useState<Tab>('dashboard')
+  const [period, setPeriod] = useState('month')
+  const [customFrom, setCustomFrom] = useState(dateMinus(30))
+  const [customTo, setCustomTo] = useState(today())
   const [summary, setSummary] = useState<Summary | null>(null)
-  const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [saved, setSaved] = useState('')
-  const [saleProductId, setSaleProductId] = useState(products[0]?.id || '')
-  const [saleSize, setSaleSize] = useState('')
+  const [notice, setNotice] = useState('')
+  const [editingExpense, setEditingExpense] = useState<Expense | null>(null)
+  const [editingMaterial, setEditingMaterial] = useState<Material | null>(null)
   const [question, setQuestion] = useState('Give me a financial overview and identify the products with the best margin.')
   const [answer, setAnswer] = useState('')
   const [asking, setAsking] = useState(false)
+  const [actionDraft, setActionDraft] = useState<AiAction | null>(null)
+  const [confirmationToken, setConfirmationToken] = useState('')
+  const [actionAnswer, setActionAnswer] = useState('')
+  const [executingAction, setExecutingAction] = useState(false)
+  const [materialLines, setMaterialLines] = useState([{ materialId: '', quantityUsed: 0 }])
 
-  const selectedSaleProduct = products.find(product => product.id === saleProductId) || products[0]
-  const saleSizes = selectedSaleProduct?.sizes || []
-  const currentSaleSize = saleSizes.find(size => `${size.value}-${size.unit}` === saleSize) || saleSizes[0]
-  const sortedSales = useMemo(() => [...(summary?.externalSales || [])].sort((a, b) => b.date.localeCompare(a.date)), [summary])
+  const range = periodDates(period, customFrom, customTo)
+  const selectedProduct = products[0]
+  const sortedProducts = useMemo(() => [...(summary?.products || [])].sort((a, b) => b.estimatedProfit - a.estimatedProfit), [summary])
 
   async function refresh() {
-    setLoading(true)
-    try { setSummary(await request<Summary>('/api/accountant/summary')); setError('') } catch (value) { setError(value instanceof Error ? value.message : 'Unable to load accountant data.') } finally { setLoading(false) }
+    setLoading(true); setError('')
+    try { setSummary(await request<Summary>(`/api/accountant/summary?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`)) } catch (value) { setError(value instanceof Error ? value.message : 'Unable to load accounting data.') } finally { setLoading(false) }
   }
 
-  useEffect(() => { void refresh() }, [])
-  useEffect(() => {
-    if (!saleProductId && products[0]) setSaleProductId(products[0].id)
-    const size = products.find(product => product.id === saleProductId)?.sizes[0]
-    if (size) setSaleSize(`${size.value}-${size.unit}`)
-  }, [products, saleProductId])
+  useEffect(() => { void refresh() }, [range.from, range.to])
+  function flash(message: string) { setNotice(message); window.setTimeout(() => setNotice(''), 3000) }
 
-  async function saveCosts(product: AccountantProduct, event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    const form = new FormData(event.currentTarget)
-    setBusy(true); setError(''); setSaved('')
-    try {
-      await request(`/api/accountant/costs/${encodeURIComponent(product.id)}`, { method: 'PUT', body: JSON.stringify({ productionCost: form.get('productionCost'), packagingCost: form.get('packagingCost') }) })
-      await refresh(); setSaved(`${product.name} costs saved.`); window.setTimeout(() => setSaved(''), 3000)
-    } catch (value) { setError(value instanceof Error ? value.message : 'Unable to save costs.') } finally { setBusy(false) }
+  async function saveCost(product: AccountantProduct, event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const form = new FormData(event.currentTarget); setBusy(true); setError('')
+    try { await request(`/api/accountant/costs/${encodeURIComponent(product.id)}`, { method: 'PUT', body: JSON.stringify({ productionCost: form.get('productionCost'), packagingCost: form.get('packagingCost') }) }); await refresh(); flash('Product cost saved.') } catch (value) { setError(value instanceof Error ? value.message : 'Unable to save product cost.') } finally { setBusy(false) }
   }
 
-  async function addSale(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    const form = new FormData(event.currentTarget)
-    setBusy(true); setError(''); setSaved('')
-    try {
-      await request('/api/accountant/sales', { method: 'POST', body: JSON.stringify({ productId: form.get('productId'), date: form.get('date'), quantity: form.get('quantity'), unitPrice: form.get('unitPrice'), size: currentSaleSize, notes: form.get('notes') }) })
-      event.currentTarget.reset(); const dateInput = event.currentTarget.elements.namedItem('date') as HTMLInputElement | null; if (dateInput) dateInput.value = today(); setSaleProductId(products[0]?.id || ''); await refresh(); setSaved('Outside sale added.'); window.setTimeout(() => setSaved(''), 3000)
-    } catch (value) { setError(value instanceof Error ? value.message : 'Unable to add outside sale.') } finally { setBusy(false) }
+  async function submitExpense(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const form = new FormData(event.currentTarget); setBusy(true); setError('')
+    const payload = { category: form.get('category'), description: form.get('description'), amount: form.get('amount'), transactionDate: form.get('transactionDate') }
+    try { await request(editingExpense ? `/api/accountant/expenses/${editingExpense.id}` : '/api/accountant/expenses', { method: editingExpense ? 'PATCH' : 'POST', body: JSON.stringify(payload) }); setEditingExpense(null); event.currentTarget.reset(); await refresh(); flash(editingExpense ? 'Expense updated.' : 'Expense recorded.') } catch (value) { setError(value instanceof Error ? value.message : 'Unable to save expense.') } finally { setBusy(false) }
   }
 
-  async function deleteSale(id: string) {
-    if (!window.confirm('Remove this outside sale from the accountant?')) return
-    setBusy(true); setError('')
-    try { await request(`/api/accountant/sales/${encodeURIComponent(id)}`, { method: 'DELETE' }); await refresh() } catch (value) { setError(value instanceof Error ? value.message : 'Unable to remove outside sale.') } finally { setBusy(false) }
+  async function removeExpense(id: string) { if (!window.confirm('Delete this expense?')) return; setBusy(true); try { await request(`/api/accountant/expenses/${id}`, { method: 'DELETE' }); await refresh(); flash('Expense deleted.') } catch (value) { setError(value instanceof Error ? value.message : 'Unable to delete expense.') } finally { setBusy(false) } }
+
+  async function submitMaterial(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const form = new FormData(event.currentTarget); setBusy(true); setError('')
+    const payload = { name: form.get('name'), category: form.get('category'), quantity: form.get('quantity'), unit: form.get('unit'), purchasePrice: form.get('purchasePrice'), costPerUnit: form.get('costPerUnit'), supplier: form.get('supplier'), purchaseDate: form.get('purchaseDate'), lowStockThreshold: form.get('lowStockThreshold') }
+    try { await request(editingMaterial ? `/api/accountant/materials/${editingMaterial.id}` : '/api/accountant/materials', { method: editingMaterial ? 'PATCH' : 'POST', body: JSON.stringify(payload) }); setEditingMaterial(null); event.currentTarget.reset(); await refresh(); flash(editingMaterial ? 'Material updated.' : 'Material purchase added.') } catch (value) { setError(value instanceof Error ? value.message : 'Unable to save material.') } finally { setBusy(false) }
   }
 
-  async function askAi(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setAsking(true); setError(''); setAnswer('')
-    try { setAnswer((await request<{ answer: string }>('/api/accountant/ask', { method: 'POST', body: JSON.stringify({ question }) })).answer) } catch (value) { setError(value instanceof Error ? value.message : 'Unable to ask the AI accountant.') } finally { setAsking(false) }
+  async function removeMaterial(id: string) { if (!window.confirm('Delete this material? Materials used in production cannot be deleted.')) return; setBusy(true); try { await request(`/api/accountant/materials/${id}`, { method: 'DELETE' }); await refresh(); flash('Material deleted.') } catch (value) { setError(value instanceof Error ? value.message : 'Unable to delete material.') } finally { setBusy(false) } }
+
+  async function submitBatch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const form = new FormData(event.currentTarget); setBusy(true); setError('')
+    const lines = materialLines.filter(line => line.materialId && Number(line.quantityUsed) > 0)
+    try { await request('/api/accountant/production/batches', { method: 'POST', body: JSON.stringify({ productId: form.get('productId'), size: { value: Number(form.get('sizeValue')), unit: form.get('sizeUnit') }, quantityProduced: form.get('quantityProduced'), packagingCost: form.get('packagingCost'), batchDate: form.get('batchDate'), notes: form.get('notes'), confirmed: true, materials: lines }) }); setMaterialLines([{ materialId: '', quantityUsed: 0 }]); event.currentTarget.reset(); await refresh(); flash('Production batch confirmed and inventory updated.') } catch (value) { setError(value instanceof Error ? value.message : 'Unable to confirm production batch.') } finally { setBusy(false) }
   }
+
+  async function submitSale(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); if (!window.confirm('Confirm this outside sale and deduct it from finished-product stock?')) return
+    const form = new FormData(event.currentTarget); setBusy(true); setError('')
+    try { await request('/api/accountant/outside-sales', { method: 'POST', body: JSON.stringify({ productId: form.get('productId'), size: { value: Number(form.get('sizeValue')), unit: form.get('sizeUnit') }, quantity: form.get('quantity'), unitPrice: form.get('unitPrice'), discountPercent: form.get('discountPercent'), paymentMethod: form.get('paymentMethod'), saleDate: form.get('saleDate'), notes: form.get('notes'), confirmed: true }) }); event.currentTarget.reset(); await refresh(); flash('Outside sale confirmed and stock updated.') } catch (value) { setError(value instanceof Error ? value.message : 'Unable to record outside sale.') } finally { setBusy(false) }
+  }
+
+  async function cancelSale(id: string) { if (!window.confirm('Cancel this sale and restore its stock?')) return; setBusy(true); try { await request(`/api/accountant/outside-sales/${id}`, { method: 'DELETE' }); await refresh(); flash('Sale cancelled and stock restored.') } catch (value) { setError(value instanceof Error ? value.message : 'Unable to cancel sale.') } finally { setBusy(false) } }
+  async function askAi(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setAsking(true); setError(''); setAnswer(''); try { setAnswer((await request<{ answer: string }>('/api/accountant/ask', { method: 'POST', body: JSON.stringify({ question, from: range.from, to: range.to }) })).answer) } catch (value) { setError(value instanceof Error ? value.message : 'Unable to ask the AI accountant.') } finally { setAsking(false) } }
+  async function prepareAiAction(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setAsking(true); setError(''); setActionDraft(null); setConfirmationToken(''); setActionAnswer(''); try { const result = await request<{ answer: string; action: AiAction | null; confirmationToken?: string }>('/api/accountant/ai/prepare', { method: 'POST', body: JSON.stringify({ question, from: range.from, to: range.to }) }); setActionAnswer(result.answer); setActionDraft(result.action); setConfirmationToken(result.confirmationToken || '') } catch (value) { setError(value instanceof Error ? value.message : 'Unable to prepare the AI action.') } finally { setAsking(false) } }
+  async function executeAiAction() { if (!actionDraft || !confirmationToken || !window.confirm('Confirm this AI-prepared financial action?')) return; setExecutingAction(true); setError(''); try { await request('/api/accountant/ai/execute', { method: 'POST', body: JSON.stringify({ confirmationToken }) }); setActionDraft(null); setConfirmationToken(''); setActionAnswer('Action completed and recorded.'); await refresh(); flash('AI action completed.') } catch (value) { setError(value instanceof Error ? value.message : 'Unable to execute the AI action.') } finally { setExecutingAction(false) } }
+
+  if (loading && !summary) return <main className="accountant-page page-wrap"><div className="accountant-card accountant-loading">Loading financial workspace…</div></main>
+  if (!summary) return <main className="accountant-page page-wrap"><div className="accountant-alert">{error || 'Accountant data is unavailable.'}</div></main>
 
   return <main className="accountant-page page-wrap">
-    <div className="admin-intro accountant-intro"><div><p className="eyebrow">Admin / Finance</p><h1>AI <em>Accountant.</em></h1><p className="admin-refresh-note">Website orders are collected automatically after successful Stripe payments.</p></div><div className="accountant-updated">{summary ? `Updated ${new Date(summary.generatedAt).toLocaleString()}` : 'Loading summary…'}</div></div>
-    {error && <div className="accountant-alert">{error}</div>}
-    {saved && <div className="accountant-success">{saved}</div>}
-    {loading && !summary ? <div className="accountant-card accountant-loading">Loading financial summary…</div> : summary && <>
-      <section className="accountant-metrics">
-        <div className="accountant-metric"><span>Website collected</span><strong>{money(summary.website.collectedRevenue)}</strong><small>{summary.website.orderCount} paid orders · includes shipping</small></div>
-        <div className="accountant-metric"><span>Outside sales</span><strong>{money(summary.external.productRevenue)}</strong><small>{summary.external.saleCount} entries · {summary.external.units} units</small></div>
-        <div className="accountant-metric"><span>Estimated cost</span><strong>{money(summary.totals.estimatedCost)}</strong><small>Creation + packaging</small></div>
-        <div className="accountant-metric highlight"><span>Estimated profit</span><strong>{money(summary.totals.estimatedProfit)}</strong><small>Product revenue minus entered costs</small></div>
-      </section>
-
-      <section className="accountant-card">
-        <div className="accountant-section-heading"><div><p className="eyebrow">Cost library</p><h2>What does each item cost?</h2></div><span>{summary.products.length} products</span></div>
-        <p className="accountant-help">Enter the cost to create one item and its packaging. The server uses these values to estimate product cost and profit.</p>
-        <div className="accountant-table-wrap"><div className="accountant-table accountant-table-head"><span>Product</span><span>Create cost</span><span>Packaging</span><span>Unit cost</span><span>Units sold</span><span>Profit</span><span /></div>
-          {summary.products.map(product => <form className="accountant-table accountant-table-row" key={product.id} onSubmit={event => saveCosts(product, event)}><div className="accountant-product-cell"><img src={product.image} alt="" /><strong>{product.name}</strong></div><input name="productionCost" type="number" min="0" step="0.01" defaultValue={product.productionCost} aria-label={`${product.name} creation cost`} /><input name="packagingCost" type="number" min="0" step="0.01" defaultValue={product.packagingCost} aria-label={`${product.name} packaging cost`} /><span>{money(product.unitCost)}</span><span>{product.totalUnits}</span><span className={product.estimatedProfit < 0 ? 'negative' : ''}>{money(product.estimatedProfit)}</span><button className="small-button" disabled={busy} type="submit">Save</button></form>)}
-          {!summary.products.length && <div className="accountant-empty">Add products first, then their creation and packaging costs will appear here.</div>}
-        </div>
-      </section>
-
-      <div className="accountant-two-col">
-        <section className="accountant-card"><div className="accountant-section-heading"><div><p className="eyebrow">Offline revenue</p><h2>Add an outside sale.</h2></div></div><p className="accountant-help">Use this for individual sales made in person, by phone or anywhere outside the website.</p><form className="accountant-form" onSubmit={addSale}><label>Product<select required name="productId" value={saleProductId} onChange={event => { setSaleProductId(event.target.value); const size = products.find(product => product.id === event.target.value)?.sizes[0]; setSaleSize(size ? `${size.value}-${size.unit}` : '') }}>{products.map(product => <option key={product.id} value={product.id}>{product.name}</option>)}</select></label><div className="accountant-form-row"><label>Date<input required name="date" type="date" defaultValue={today()} /></label><label>Quantity<input required name="quantity" type="number" min="1" step="1" defaultValue="1" /></label></div><div className="accountant-form-row"><label>Size<select name="size" value={currentSaleSize ? `${currentSaleSize.value}-${currentSaleSize.unit}` : ''} onChange={event => setSaleSize(event.target.value)}>{saleSizes.map(size => <option key={`${size.value}-${size.unit}`} value={`${size.value}-${size.unit}`}>{size.value} {size.unit}</option>)}</select></label><label>Unit price (AED)<input required name="unitPrice" type="number" min="0" step="0.01" /></label></div><label>Notes <span className="optional">optional</span><textarea name="notes" placeholder="Customer name, market or context (no private details needed)"></textarea></label><button className="button button-dark full-button" disabled={busy || !products.length} type="submit">Add outside sale</button></form></section>
-        <section className="accountant-card"><div className="accountant-section-heading"><div><p className="eyebrow">Manual ledger</p><h2>Outside sales.</h2></div><span>{sortedSales.length} entries</span></div><div className="accountant-sales-list">{sortedSales.map(sale => <div className="accountant-sale-row" key={sale.id}><div><strong>{sale.productName}</strong><small>{sale.date} · {sale.size?.value || '—'} {sale.size?.unit || ''} · Qty {sale.quantity}</small>{sale.notes && <small>{sale.notes}</small>}</div><strong>{money(sale.total)}</strong><button className="text-button danger-text" disabled={busy} onClick={() => void deleteSale(sale.id)}>Remove</button></div>)}{!sortedSales.length && <div className="accountant-empty">No outside sales entered yet.</div>}</div></section>
-      </div>
-
-      <section className="accountant-card ai-accountant-card"><div className="accountant-section-heading"><div><p className="eyebrow">OpenAI assistant</p><h2>Ask about the business.</h2></div><span>Uses the current summary only</span></div><p className="accountant-help">The arithmetic is calculated by the website. OpenAI explains the results and finds patterns without receiving customer names, emails, phone numbers or addresses.</p><form className="accountant-ai-form" onSubmit={askAi}><textarea value={question} onChange={event => setQuestion(event.target.value)} aria-label="Question for AI accountant" /><button className="button button-dark" disabled={asking || !question.trim()} type="submit">{asking ? 'Thinking…' : 'Ask accountant'}</button></form>{answer && <div className="accountant-answer"><p className="eyebrow">AI analysis</p>{answer.split('\n').map((line, index) => <p key={`${line}-${index}`}>{line || ' '}</p>)}</div>}</section>
-    </>}
+    <div className="admin-intro accountant-intro"><div><p className="eyebrow">Admin / Finance</p><h1>Financial <em>workspace.</em></h1><p className="admin-refresh-note">All figures are calculated from recorded website sales, outside sales, expenses, materials and batches.</p></div><div className="accountant-updated">Updated {new Date(summary.generatedAt).toLocaleString()}</div></div>
+    <div className="accountant-toolbar"><div className="accountant-tabs">{([['dashboard', 'Dashboard'], ['costs', 'Product costs'], ['expenses', 'Expenses'], ['materials', 'Materials'], ['production', 'Production'], ['sales', 'Outside sales'], ['inventory', 'Inventory']] as [Tab, string][]).map(([key, label]) => <button key={key} className={tab === key ? 'accountant-tab active' : 'accountant-tab'} onClick={() => setTab(key)}>{label}</button>)}</div><div className="accountant-period"><select value={period} onChange={event => setPeriod(event.target.value)}><option value="today">Today</option><option value="week">This week</option><option value="month">This month</option><option value="year">This year</option><option value="custom">Custom range</option></select>{period === 'custom' && <><input type="date" value={customFrom} onChange={event => setCustomFrom(event.target.value)} /><input type="date" value={customTo} onChange={event => setCustomTo(event.target.value)} /></>}</div></div>
+    {error && <div className="accountant-alert">{error}</div>}{notice && <div className="accountant-success">{notice}</div>}
+    {tab === 'dashboard' && <Dashboard summary={summary} products={sortedProducts} onAsk={askAi} onPrepareAction={prepareAiAction} question={question} setQuestion={setQuestion} answer={answer} actionAnswer={actionAnswer} actionDraft={actionDraft} onExecuteAction={executeAiAction} asking={asking} executingAction={executingAction} />}
+    {tab === 'costs' && <Costs products={summary.products} onSave={saveCost} busy={busy} />}
+    {tab === 'expenses' && <Expenses summary={summary} editing={editingExpense} setEditing={setEditingExpense} onSubmit={submitExpense} onDelete={removeExpense} busy={busy} />}
+    {tab === 'materials' && <Materials summary={summary} editing={editingMaterial} setEditing={setEditingMaterial} onSubmit={submitMaterial} onDelete={removeMaterial} busy={busy} />}
+    {tab === 'production' && <Production products={products} materials={summary.materials} batches={summary.batches} materialLines={materialLines} setMaterialLines={setMaterialLines} onSubmit={submitBatch} busy={busy} />}
+    {tab === 'sales' && <OutsideSales products={products} sales={summary.outsideSales} onSubmit={submitSale} onCancel={cancelSale} busy={busy} />}
+    {tab === 'inventory' && <Inventory items={summary.inventory} />}
   </main>
 }
+
+function Dashboard({ summary, products, onAsk, onPrepareAction, question, setQuestion, answer, actionAnswer, actionDraft, onExecuteAction, asking, executingAction }: { summary: Summary; products: AccountantProduct[]; onAsk: (event: FormEvent<HTMLFormElement>) => void; onPrepareAction: (event: FormEvent<HTMLFormElement>) => void; question: string; setQuestion: (value: string) => void; answer: string; actionAnswer: string; actionDraft: AiAction | null; onExecuteAction: () => void; asking: boolean; executingAction: boolean }) {
+  const metrics: [string, number, string][] = [['Total revenue', summary.dashboard.totalRevenue, 'Website + outside sales + delivery'], ['Gross profit', summary.dashboard.grossProfit, 'Revenue minus cost of goods'], ['Net profit', summary.dashboard.netProfit, 'Gross profit minus expenses'], ['Total expenses', summary.dashboard.totalExpenses, 'Recorded operating expenses'], ['Cost of goods sold', summary.dashboard.costOfGoodsSold, 'Product creation + packaging'], ['Inventory value', summary.dashboard.inventoryValue, 'Finished products + materials']]
+  const [simulationPrice, setSimulationPrice] = useState(150)
+  const [simulationQuantity, setSimulationQuantity] = useState(20)
+  const averageCost = summary.dashboard.totalProductsSold ? summary.dashboard.costOfGoodsSold / summary.dashboard.totalProductsSold : 0
+  const simulationContribution = simulationPrice - averageCost
+  const simulationProfit = simulationContribution * simulationQuantity
+  return <><section className="accountant-metrics accountant-metrics-six">{metrics.map(([label, value, hint]) => <div className="accountant-metric" key={label}><span>{label}</span><strong className={value < 0 ? 'negative' : ''}>{money(value)}</strong><small>{hint}</small></div>)}</section><section className="accountant-dashboard-grid"><div className="accountant-card"><div className="accountant-section-heading"><div><p className="eyebrow">Sales mix</p><h2>Where revenue comes from.</h2></div></div><div className="accountant-split-stat"><div><span>Website sales</span><strong>{money(summary.dashboard.websiteSales)}</strong><small>{summary.website.orderCount} paid orders · {summary.website.units} units</small></div><div><span>Outside sales</span><strong>{money(summary.dashboard.outsideSales)}</strong><small>{summary.external.saleCount} entries · {summary.external.units} units</small></div></div><div className="break-even-box"><div><p className="eyebrow">Break-even progress</p><strong>{summary.dashboard.breakEvenProgress}%</strong><p>{summary.breakEven.unitsSold} of {summary.breakEven.unitsNeeded || '—'} units needed to cover fixed expenses</p></div><div className="progress-track"><span style={{ width: `${Math.min(100, summary.dashboard.breakEvenProgress)}%` }} /></div><small>Contribution margin: {money(summary.breakEven.contributionMargin)} · Fixed expenses: {money(summary.breakEven.fixedExpenses)}</small></div><div className="break-even-simulator"><p className="eyebrow">Break-even simulator</p><div className="accountant-form-row"><label>Simulated price<input type="number" min="0" step="0.01" value={simulationPrice} onChange={event => setSimulationPrice(Number(event.target.value))} /></label><label>Quantity<input type="number" min="0" step="1" value={simulationQuantity} onChange={event => setSimulationQuantity(Number(event.target.value))} /></label></div><p>Estimated contribution: <strong>{money(simulationContribution)}</strong> per item · Estimated result: <strong className={simulationProfit < 0 ? 'negative' : ''}>{money(simulationProfit)}</strong></p></div></div><div className="accountant-card"><div className="accountant-section-heading"><div><p className="eyebrow">Profit leaders</p><h2>Best estimated margins.</h2></div></div><div className="accountant-leader-list">{products.slice(0, 5).map(product => <div key={product.id}><div><strong>{product.name}</strong><small>{product.totalUnits} units · {money(product.totalRevenue)} revenue</small></div><strong>{money(product.estimatedProfit)}</strong></div>)}{!products.length && <div className="accountant-empty">Add products and record sales to see margin leaders.</div>}</div></div></section><section className="accountant-card ai-accountant-card"><div className="accountant-section-heading"><div><p className="eyebrow">OpenAI assistant</p><h2>Ask about the business.</h2></div><span>English or العربية</span></div><p className="accountant-help">The server performs the arithmetic. OpenAI explains the selected period using an anonymized financial summary.</p><div className="accountant-ai-form"><form onSubmit={onAsk}><textarea value={question} onChange={event => setQuestion(event.target.value)} aria-label="Question for AI accountant" /><button className="button button-dark" disabled={asking || !question.trim()} type="submit">{asking ? 'Thinking…' : 'Ask accountant'}</button></form><form onSubmit={onPrepareAction}><button className="button button-light" disabled={asking || !question.trim()} type="submit">{asking ? 'Preparing…' : 'Prepare action'}</button></form></div>{answer && <div className="accountant-answer"><p className="eyebrow">AI analysis</p>{answer.split('\n').map((line, index) => <p key={`${line}-${index}`}>{line || ' '}</p>)}</div>}{actionAnswer && <div className="accountant-action-draft"><p className="eyebrow">Action review</p><p>{actionAnswer}</p>{actionDraft ? <><pre>{JSON.stringify(actionDraft, null, 2)}</pre><button className="button button-dark" disabled={executingAction} onClick={onExecuteAction}>{executingAction ? 'Saving…' : 'Confirm and save action'}</button></> : <small>No action was prepared. Add the exact details and try again.</small>}</div>}</section></>
+}
+
+function Costs({ products, onSave, busy }: { products: AccountantProduct[]; onSave: (product: AccountantProduct, event: FormEvent<HTMLFormElement>) => void; busy: boolean }) {
+  return <section className="accountant-card"><div className="accountant-section-heading"><div><p className="eyebrow">Cost library</p><h2>Creation and packaging costs.</h2></div><span>{products.length} products</span></div><p className="accountant-help">Set a per-item cost when you do not have a production batch yet. Confirmed batches update these values from their actual material and packaging costs.</p><div className="accountant-cost-list">{products.map(product => <form className="accountant-cost-row" key={product.id} onSubmit={event => onSave(product, event)}><div><strong>{product.name}</strong><small>{product.totalUnits} units sold · {money(product.unitCost)} current unit cost</small></div><label>Creation<input name="productionCost" type="number" min="0" step="0.01" defaultValue={product.productionCost} /></label><label>Packaging<input name="packagingCost" type="number" min="0" step="0.01" defaultValue={product.packagingCost} /></label><strong>{money(product.estimatedProfit)}</strong><button className="small-button" disabled={busy} type="submit">Save</button></form>)}{!products.length && <div className="accountant-empty">Add a product before entering costs.</div>}</div></section>
+}
+
+function Expenses({ summary, editing, setEditing, onSubmit, onDelete, busy }: { summary: Summary; editing: Expense | null; setEditing: (value: Expense | null) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onDelete: (id: string) => void; busy: boolean }) {
+  const [query, setQuery] = useState('')
+  const filteredExpenses = summary.expenses.filter(expense => `${expense.category} ${expense.description}`.toLowerCase().includes(query.toLowerCase()))
+  return <div className="accountant-two-col accountant-workspace-grid"><section className="accountant-card"><div className="accountant-section-heading"><div><p className="eyebrow">Expense management</p><h2>{editing ? 'Edit expense.' : 'Record expense.'}</h2></div></div><form className="accountant-form" onSubmit={onSubmit}><label>Category<select name="category" defaultValue={editing?.category || 'Other Expenses'}>{expenseCategories.map(category => <option key={category}>{category}</option>)}</select></label><label>Amount (AED)<input required name="amount" type="number" min="0.01" step="0.01" defaultValue={editing?.amount || ''} /></label><label>Transaction date<input required name="transactionDate" type="date" defaultValue={editing?.transaction_date || today()} /></label><label>Description<input name="description" defaultValue={editing?.description || ''} placeholder="What was this expense for?" /></label><button className="button button-dark full-button" disabled={busy} type="submit">{editing ? 'Save expense' : 'Add expense'}</button>{editing && <button className="text-button full-button" type="button" onClick={() => setEditing(null)}>Cancel editing</button>}</form></section><section className="accountant-card"><div className="accountant-section-heading"><div><p className="eyebrow">Recorded expenses</p><h2>{money(summary.dashboard.totalExpenses)}</h2></div><span>{summary.expenses.length} entries</span></div><input className="accountant-search" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search expenses" aria-label="Search expenses" /><div className="accountant-ledger">{filteredExpenses.map(expense => <div className="accountant-ledger-row" key={expense.id}><div><strong>{expense.category}</strong><small>{expense.transaction_date} · {expense.description || 'No description'}</small></div><strong>{money(expense.amount)}</strong><button className="text-button" onClick={() => setEditing(expense)}>Edit</button><button className="text-button danger-text" disabled={busy} onClick={() => onDelete(expense.id)}>Delete</button></div>)}{!filteredExpenses.length && <div className="accountant-empty">No expenses found in this period.</div>}</div></section></div>
+}
+
+function Materials({ summary, editing, setEditing, onSubmit, onDelete, busy }: { summary: Summary; editing: Material | null; setEditing: (value: Material | null) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onDelete: (id: string) => void; busy: boolean }) {
+  return <div className="accountant-two-col accountant-workspace-grid"><section className="accountant-card"><div className="accountant-section-heading"><div><p className="eyebrow">Raw materials</p><h2>{editing ? 'Edit material.' : 'Add a purchase.'}</h2></div></div><form className="accountant-form" onSubmit={onSubmit}><label>Name<input required name="name" defaultValue={editing?.name || ''} placeholder="Oud oil, bottles, boxes…" /></label><div className="accountant-form-row"><label>Category<select name="category" defaultValue={editing?.category || 'Other'}>{materialCategories.map(category => <option key={category}>{category}</option>)}</select></label><label>Unit<select name="unit" defaultValue={editing?.unit || 'pieces'}>{units.map(unit => <option key={unit}>{unit}</option>)}</select></label></div><div className="accountant-form-row"><label>Quantity<input required name="quantity" type="number" min="0" step="0.001" defaultValue={editing?.quantity ?? ''} /></label><label>Cost per unit (AED)<input name="costPerUnit" type="number" min="0" step="0.0001" defaultValue={editing?.cost_per_unit || ''} /></label></div><div className="accountant-form-row"><label>Purchase price (AED)<input name="purchasePrice" type="number" min="0" step="0.01" defaultValue={editing?.purchase_price || ''} /></label><label>Low-stock alert<input name="lowStockThreshold" type="number" min="0" step="0.001" defaultValue={editing?.low_stock_threshold || 0} /></label></div><div className="accountant-form-row"><label>Purchase date<input required name="purchaseDate" type="date" defaultValue={editing?.purchase_date || today()} /></label><label>Supplier <span className="optional">optional</span><input name="supplier" defaultValue={editing?.supplier || ''} /></label></div><button className="button button-dark full-button" disabled={busy} type="submit">{editing ? 'Save material' : 'Add material purchase'}</button>{editing && <button className="text-button full-button" type="button" onClick={() => setEditing(null)}>Cancel editing</button>}</form></section><section className="accountant-card"><div className="accountant-section-heading"><div><p className="eyebrow">Material inventory</p><h2>Available stock.</h2></div><span>{summary.materials.length} materials</span></div><div className="accountant-ledger">{summary.materials.map(material => <div className="accountant-ledger-row" key={material.id}><div><strong>{material.name}</strong><small>{material.category} · {material.supplier || 'No supplier'}</small></div><strong className={material.quantity <= material.low_stock_threshold ? 'low-stock' : ''}>{material.quantity} {material.unit}</strong><button className="text-button" onClick={() => setEditing(material)}>Edit</button><button className="text-button danger-text" disabled={busy} onClick={() => onDelete(material.id)}>Delete</button></div>)}{!summary.materials.length && <div className="accountant-empty">No raw materials recorded yet.</div>}</div></section></div>
+}
+
+function Production({ products, materials, batches, materialLines, setMaterialLines, onSubmit, busy }: { products: Product[]; materials: Material[]; batches: Batch[]; materialLines: { materialId: string; quantityUsed: number }[]; setMaterialLines: (value: { materialId: string; quantityUsed: number }[]) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void; busy: boolean }) {
+  const product = products[0]
+  return <div className="accountant-two-col accountant-workspace-grid"><section className="accountant-card"><div className="accountant-section-heading"><div><p className="eyebrow">Production batches</p><h2>Make finished stock.</h2></div></div><p className="accountant-help">Confirming a batch deducts the selected raw materials and adds finished products to stock. Sizes are stored independently in the production history.</p><form className="accountant-form" onSubmit={onSubmit}><label>Product<select required name="productId">{products.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><div className="accountant-form-row"><label>Size<input required name="sizeValue" type="number" min="1" defaultValue={product?.sizes[0]?.value || 50} /></label><label>Unit<select name="sizeUnit"><option value="ml">ml</option><option value="g">g</option></select></label></div><div className="accountant-form-row"><label>Finished quantity<input required name="quantityProduced" type="number" min="1" step="1" defaultValue="1" /></label><label>Packaging cost (AED)<input required name="packagingCost" type="number" min="0" step="0.01" defaultValue="0" /></label></div><label>Batch date<input required name="batchDate" type="date" defaultValue={today()} /></label><div className="batch-material-heading"><span className="field-label">Materials used</span><button type="button" className="text-button" onClick={() => setMaterialLines([...materialLines, { materialId: '', quantityUsed: 0 }])}>＋ Add material</button></div>{materialLines.map((line, index) => <div className="batch-material-row" key={index}><select required value={line.materialId} onChange={event => setMaterialLines(materialLines.map((item, itemIndex) => itemIndex === index ? { ...item, materialId: event.target.value } : item))}><option value="">Select material</option>{materials.map(material => <option key={material.id} value={material.id}>{material.name} ({material.quantity} {material.unit})</option>)}</select><input required type="number" min="0.001" step="0.001" value={line.quantityUsed || ''} onChange={event => setMaterialLines(materialLines.map((item, itemIndex) => itemIndex === index ? { ...item, quantityUsed: Number(event.target.value) } : item))} placeholder="Quantity" />{materialLines.length > 1 && <button type="button" className="icon-button danger" onClick={() => setMaterialLines(materialLines.filter((_, itemIndex) => itemIndex !== index))}>×</button>}</div>)}<label>Notes <span className="optional">optional</span><textarea name="notes"></textarea></label><button className="button button-dark full-button" disabled={busy || !products.length || !materials.length} type="submit">Confirm production batch</button></form></section><section className="accountant-card"><div className="accountant-section-heading"><div><p className="eyebrow">Production history</p><h2>Completed batches.</h2></div><span>{batches.length} batches</span></div><div className="accountant-ledger">{batches.map(batch => <div className="accountant-ledger-row" key={batch.id}><div><strong>{products.find(productItem => productItem.id === batch.product_id)?.name || 'Deleted product'} · {batch.size_value}{batch.size_unit}</strong><small>{batch.batch_date} · {batch.quantity_produced} finished · {batch.status}</small></div><strong>{money(batch.cost_per_finished_product)} / item</strong></div>)}{!batches.length && <div className="accountant-empty">No production batches recorded yet.</div>}</div></section></div>
+}
+
+function OutsideSales({ products, sales, onSubmit, onCancel, busy }: { products: Product[]; sales: Sale[]; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onCancel: (id: string) => void; busy: boolean }) {
+  const product = products[0]
+  return <div className="accountant-two-col accountant-workspace-grid"><section className="accountant-card"><div className="accountant-section-heading"><div><p className="eyebrow">Outside sales</p><h2>Record a confirmed sale.</h2></div></div><p className="accountant-help">The confirmation step deducts finished-product stock. Website orders remain separate and continue to come from Stripe.</p><form className="accountant-form" onSubmit={onSubmit}><label>Product<select required name="productId">{products.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><div className="accountant-form-row"><label>Size<input required name="sizeValue" type="number" min="1" defaultValue={product?.sizes[0]?.value || 50} /></label><label>Unit<select name="sizeUnit"><option value="ml">ml</option><option value="g">g</option></select></label></div><div className="accountant-form-row"><label>Quantity<input required name="quantity" type="number" min="1" step="1" defaultValue="1" /></label><label>Unit price (AED)<input required name="unitPrice" type="number" min="0" step="0.01" /></label></div><div className="accountant-form-row"><label>Discount %<input name="discountPercent" type="number" min="0" max="100" step="0.01" defaultValue="0" /></label><label>Payment method<select name="paymentMethod">{paymentMethods.map(method => <option key={method}>{method}</option>)}</select></label></div><label>Sale date<input required name="saleDate" type="date" defaultValue={today()} /></label><label>Notes <span className="optional">optional</span><textarea name="notes"></textarea></label><button className="button button-dark full-button" disabled={busy || !products.length} type="submit">Confirm outside sale</button></form></section><section className="accountant-card"><div className="accountant-section-heading"><div><p className="eyebrow">Outside ledger</p><h2>Recorded sales.</h2></div><span>{sales.length} entries</span></div><div className="accountant-ledger">{sales.map(sale => <div className="accountant-ledger-row" key={sale.id}><div><strong>{sale.productName} · {sale.size_value}{sale.size_unit}</strong><small>{sale.sale_date} · Qty {sale.quantity} · {sale.payment_method} · {sale.status}</small></div><strong>{money(sale.total)}</strong><button className="text-button danger-text" disabled={busy || sale.status === 'Cancelled'} onClick={() => onCancel(sale.id)}>Cancel</button></div>)}{!sales.length && <div className="accountant-empty">No outside sales recorded in this period.</div>}</div></section></div>
+}
+
+function Inventory({ items }: { items: InventoryItem[] }) { return <section className="accountant-card"><div className="accountant-section-heading"><div><p className="eyebrow">Inventory management</p><h2>Stock across the business.</h2></div><span>{items.filter(item => item.lowStock).length} low-stock alerts</span></div><div className="accountant-inventory-grid">{items.map(item => <div className={item.lowStock ? 'accountant-inventory-item low' : 'accountant-inventory-item'} key={`${item.inventoryType}-${item.id}`}><span>{item.inventoryType}</span><strong>{item.name}</strong><p>{item.quantity} {item.unit}</p><small>{money(item.value)} inventory value</small>{item.lowStock && <b>Low stock</b>}</div>)}{!items.length && <div className="accountant-empty">No inventory records yet.</div>}</div></section> }
 
