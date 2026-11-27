@@ -38,9 +38,11 @@ SUPABASE_SECRET_KEY=your-server-only-supabase-secret-key
 SUPABASE_STORAGE_BUCKET=fragrance-products
 ```
 
-## AI accountant
+## Financial accountant
 
-The private `/accountant-test` page is available after the admin signs in through `/admin`. The website calculates the accounting numbers on the server from paid website orders, product creation costs, packaging costs, and outside sales entered by the admin. Outside sales are saved in the same Supabase-backed store.
+The private `/admin/accountant` page is available after the admin signs in through `/admin`. `/accountant-test` remains a compatibility alias. The financial workspace includes date-filtered revenue, gross profit, net profit, expenses, cost of goods sold, break-even progress, raw-material inventory, production batches, finished-product inventory, outside sales, low-stock alerts, audit logs, and the OpenAI assistant. Website orders remain collected automatically from successful Stripe payments.
+
+Accounting records use dedicated Supabase tables: expenses, materials, outside sales, production batches, batch-material lines, idempotent inventory movements, and audit logs. Existing products, orders, customer records, and the original `fragrance_land_state` store are preserved.
 
 To enable the OpenAI analysis assistant, add these server-only variables in Render. Never expose `OPENAI_API_KEY` to the browser, Vite variables, or GitHub.
 
@@ -50,6 +52,8 @@ OPENAI_MODEL=gpt-5-mini
 ```
 
 The arithmetic remains server-calculated; OpenAI receives the financial summary without customer names, emails, phone numbers, or addresses and provides explanations and business observations.
+
+AI record requests are confirmation-gated: the assistant prepares a draft, the admin reviews it, and only the explicit confirmation button executes a validated backend action.
 
 ## Production direction
 
